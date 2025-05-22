@@ -1,6 +1,6 @@
 import chess.pgn
 
-input_file = "lichess_db_standard_rated_2024-01.pgn"  # Replace with your actual file
+input_file = "data.pgn"  # Replace with your actual file
 output_file = "data.pgn"
 min_elo = 2000
 
@@ -17,4 +17,5 @@ with open(input_file, encoding="utf-8") as pgn_in, open(output_file, "w", encodi
             continue  # Skip games with invalid Elo values
 
         if white_elo >= min_elo and black_elo >= min_elo:
+            print("found a game with both players above the threshold")
             print(game, file=pgn_out, end="\n\n")
