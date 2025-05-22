@@ -2,37 +2,23 @@ import kagglehub
 import pandas as pd
 import os
 import chess
-import tensorflow as tf
 import numpy as np
-from kagglehub import KaggleDatasetAdapter
 
 ELO_THRESHOLD = 1650
 
-# Download both datasets
-print("Downloading datasets...")
+# Download Lichess dataset only
+print("Downloading Lichess dataset...")
 
 # Download Lichess dataset
 lichess_path = kagglehub.dataset_download("datasnaek/chess")
 print("Path to Lichess dataset files:", lichess_path)
 
-# Download Chess.com dataset
-try:
-    chesscom_df = kagglehub.load_dataset(
-        KaggleDatasetAdapter.PANDAS,
-        "adityajha1504/chesscom-user-games-60000-games",
-        "",
-    )
-    print("Chess.com dataset loaded successfully")
-except Exception as e:
-    print(f"Error loading Chess.com dataset: {e}")
-    chesscom_df = pd.DataFrame()
-
 # Load Lichess games data
 lichess_file = os.path.join(lichess_path, 'games.csv')
 lichess_df = pd.read_csv(lichess_file)
 
-def standardize_datasets(lichess_df, chesscom_df):
-    """Standardize column names and structure between datasets"""
+def standardize_lichess_dataset(lichess_df):
+    """Standardize Lichess dataset column names"""
     
     # Standardize Lichess dataset columns
     lichess_standardized = lichess_df.copy()
@@ -44,51 +30,28 @@ def standardize_datasets(lichess_df, chesscom_df):
     # Add source column to identify dataset origin
     lichess_standardized['source'] = 'lichess'
     
-    # Standardize Chess.com dataset columns
-    if not chesscom_df.empty:
-        chesscom_standardized = chesscom_df.copy()
-        chesscom_standardized['source'] = 'chesscom'
-        
-        # Ensure required columns exist
-        required_columns = ['white_username', 'black_username', 'white_rating', 'black_rating', 'moves']
-        for col in required_columns:
-            if col not in chesscom_standardized.columns:
-                print(f"Warning: {col} not found in Chess.com dataset")
-                chesscom_standardized[col] = None
-    else:
-        chesscom_standardized = pd.DataFrame()
-    
-    return lichess_standardized, chesscom_standardized
+    return lichess_standardized
 
-# Standardize both datasets
-lichess_std, chesscom_std = standardize_datasets(lichess_df, chesscom_df)
+# Standardize Lichess dataset
+combined_df = standardize_lichess_dataset(lichess_df)
+print(f"Using Lichess dataset with {len(combined_df)} games")
 
-# Combine datasets
-if not chesscom_std.empty:
-    # Find common columns
-    common_columns = list(set(lichess_std.columns) & set(chesscom_std.columns))
-    combined_df = pd.concat([
-        lichess_std[common_columns], 
-        chesscom_std[common_columns]
-    ], ignore_index=True)
-    print(f"Combined dataset created with {len(combined_df)} total games")
-else:
-    combined_df = lichess_std
-    print(f"Using only Lichess dataset with {len(combined_df)} games")
-
-# Filter games where both players have ratings over 1800
+# Filter games where both players have ratings over threshold
 print("Filtering high-rated games...")
 high_rated_games = combined_df[
     (pd.to_numeric(combined_df['white_rating'], errors='coerce') > ELO_THRESHOLD) & 
     (pd.to_numeric(combined_df['black_rating'], errors='coerce') > ELO_THRESHOLD)
 ].dropna(subset=['white_rating', 'black_rating', 'moves'])
 
+# Remove games with empty moves
+high_rated_games = high_rated_games[high_rated_games['moves'].str.len() > 0]
+
 # Save filtered games to a new file
 output_file = os.path.join('/home/user/Desktop/ChessDatasetProccesing', 'high_rated_games.csv')
 high_rated_games.to_csv(output_file, index=False)
 
-print(f"Saved {len(high_rated_games)} games with players rated over 1800 to: {output_file}")
-print(f"Dataset sources: {high_rated_games['source'].value_counts().to_dict()}")
+print(f"Saved {len(high_rated_games)} games with players rated over {ELO_THRESHOLD} to: {output_file}")
+print(f"Dataset source: Lichess only")
 
 # load the games data 
 games = pd.read_csv('high_rated_games.csv')
@@ -117,17 +80,24 @@ def construct_board_from_moves(moves):
         if move in move_to_number:
             next_move.append(move_to_number[move])
             try:
-                chess_move = chess.Move.from_uci(move)
+                # Try parsing as SAN notation first (more common in chess datasets)
+                chess_move = board.parse_san(move)
                 board.push(chess_move)
             except ValueError:
                 try:
-                    # Try parsing as SAN notation
-                    chess_move = board.parse_san(move)
-                    board.push(chess_move)
+                    # Fall back to UCI format
+                    chess_move = chess.Move.from_uci(move)
+                    if chess_move in board.legal_moves:
+                        board.push(chess_move)
+                    else:
+                        print(f"Illegal UCI move: {move}")
+                        break
                 except ValueError:
                     print(f"Could not parse move: {move}")
+                    break
         else:
             print(f"Move {move} not found in dictionary.")
+            break
     
     # Convert board to a representation suitable for ML
     board_state = board_to_array(board)
@@ -135,33 +105,55 @@ def construct_board_from_moves(moves):
     return board_state, next_move
 
 def board_to_array(board):
-    """Convert a chess board to a numerical array representation."""
-    piece_to_int = {
-        'p': -1, 'n': -2, 'b': -3, 'r': -4, 'q': -5, 'k': -6,
-        'P': 1, 'N': 2, 'B': 3, 'R': 4, 'Q': 5, 'K': 6,
-        '.': 0
+    """Convert a chess board to a comprehensive multi-channel array representation."""
+    # 12 channels for pieces (6 piece types × 2 colors)
+    # + 4 channels for castling rights
+    # + 1 channel for en passant
+    # + 1 channel for turn to move
+    # + 1 channel for move count (normalized)
+    # Total: 19 channels
+    
+    board_array = np.zeros((8, 8, 19), dtype=np.float32)
+    
+    # Piece type mapping
+    piece_channels = {
+        chess.PAWN: 0, chess.KNIGHT: 1, chess.BISHOP: 2,
+        chess.ROOK: 3, chess.QUEEN: 4, chess.KING: 5
     }
     
-    # Create 8x8 board representation
-    board_array = np.zeros((8, 8), dtype=np.int8)
+    # Fill piece positions (12 channels)
+    for square in chess.SQUARES:
+        piece = board.piece_at(square)
+        if piece:
+            row, col = divmod(square, 8)
+            # White pieces: channels 0-5, Black pieces: channels 6-11
+            channel = piece_channels[piece.piece_type]
+            if piece.color == chess.BLACK:
+                channel += 6
+            board_array[7-row, col, channel] = 1.0
     
-    for i in range(8):
-        for j in range(8):
-            square = chess.square(j, 7-i)  # chess.square takes file, rank
-            piece = board.piece_at(square)
-            if piece:
-                # Convert to FEN-like character and map to integer
-                piece_char = piece.symbol()
-                board_array[i, j] = piece_to_int[piece_char]
+    # Castling rights (4 channels)
+    board_array[:, :, 12] = float(board.has_kingside_castling_rights(chess.WHITE))
+    board_array[:, :, 13] = float(board.has_queenside_castling_rights(chess.WHITE))
+    board_array[:, :, 14] = float(board.has_kingside_castling_rights(chess.BLACK))
+    board_array[:, :, 15] = float(board.has_queenside_castling_rights(chess.BLACK))
+    
+    # En passant square (1 channel)
+    if board.ep_square is not None:
+        ep_row, ep_col = divmod(board.ep_square, 8)
+        board_array[7-ep_row, ep_col, 16] = 1.0
+    
+    # Turn to move (1 channel)
+    board_array[:, :, 17] = float(board.turn == chess.WHITE)
+    
+    # Move count normalized (1 channel)
+    # Normalize by typical game length (~40 moves)
+    move_count = board.fullmove_number / 40.0
+    board_array[:, :, 18] = min(move_count, 1.0)
     
     return board_array
 
 if __name__ == "__main__":
     # load the games data
     games = pd.read_csv('high_rated_games.csv')
-    # get how many lichess games are there
-    lichess_games = games[games['source'] == 'lichess']
-    print(f"Number of Lichess games: {len(lichess_games)}")
-    # get how many chess.com games are there
-    chesscom_games = games[games['source'] == 'chesscom']
-    print(f"Number of Chess.com games: {len(chesscom_games)}")
+    print(f"Number of Lichess games: {len(games)}")
