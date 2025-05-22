@@ -29,7 +29,7 @@ print("Built with CUDA: ", tf.test.is_built_with_cuda())
 BOARD_SHAPE = (8, 8, 1)
 NUM_LAYERS = 12
 D_MODEL = 1024
-NUM_HEADS = 8
+NUM_HEADS = 16
 DFF = 4096
 DROPOUT_RATE = 0.1
 BATCH_SIZE = 256
