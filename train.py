@@ -37,7 +37,7 @@ if TEST_SMALL_MODEL == False:
     D_MODEL = 1024
     NUM_HEADS = 12
     DFF = 4096
-    DROPOUT_RATE = 0.1
+    DROPOUT_RATE = 0.2
     BATCH_SIZE = 200
 else:
     # Small model is overfitting
@@ -47,11 +47,21 @@ else:
     # DFF = 2048
     # DROPOUT_RATE = 0.1
     # BATCH_SIZE = 256
-    NUM_LAYERS = 3
-    D_MODEL = 1024
+
+
+    # V1
+    # NUM_LAYERS = 3
+    # D_MODEL = 1024
+    # NUM_HEADS = 6
+    # DFF = 2048
+    # DROPOUT_RATE = 0.2
+    # BATCH_SIZE = 512
+    # V2
+    NUM_LAYERS = 6
+    D_MODEL = 512
     NUM_HEADS = 6
-    DFF = 2048
-    DROPOUT_RATE = 0.2
+    DFF = 768
+    DROPOUT_RATE = 0.3
     BATCH_SIZE = 512
 
 
