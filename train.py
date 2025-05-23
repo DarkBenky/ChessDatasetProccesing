@@ -40,12 +40,20 @@ if TEST_SMALL_MODEL == False:
     DROPOUT_RATE = 0.1
     BATCH_SIZE = 200
 else:
-    NUM_LAYERS = 4
-    D_MODEL = 2048
-    NUM_HEADS = 8
+    # Small model is overfitting
+    # NUM_LAYERS = 4
+    # D_MODEL = 2048
+    # NUM_HEADS = 8
+    # DFF = 2048
+    # DROPOUT_RATE = 0.1
+    # BATCH_SIZE = 256
+    NUM_LAYERS = 3
+    D_MODEL = 1024
+    NUM_HEADS = 6
     DFF = 2048
-    DROPOUT_RATE = 0.1
-    BATCH_SIZE = 256
+    DROPOUT_RATE = 0.2
+    BATCH_SIZE = 512
+
 
 EPOCHS = 150
 LEARNING_RATE = 0.0001  # Reduced from 0.001
