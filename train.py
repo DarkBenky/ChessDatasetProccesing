@@ -27,13 +27,24 @@ print("Built with CUDA: ", tf.test.is_built_with_cuda())
 tf.keras.mixed_precision.set_global_policy('mixed_float16')
 
 # Constants
+TEST_SMALL_MODEL = True
+
 BOARD_SHAPE = (8, 8, 19)  # Updated to 19 channels
-NUM_LAYERS = 8
-D_MODEL = 1024
-NUM_HEADS = 12
-DFF = 4096
-DROPOUT_RATE = 0.1
-BATCH_SIZE = 200
+if TEST_SMALL_MODEL == False:
+    NUM_LAYERS = 10
+    D_MODEL = 1024
+    NUM_HEADS = 12
+    DFF = 4096
+    DROPOUT_RATE = 0.1
+    BATCH_SIZE = 200
+else:
+    NUM_LAYERS = 3
+    D_MODEL = 512
+    NUM_HEADS = 8
+    DFF = 2048
+    DROPOUT_RATE = 0.1
+    BATCH_SIZE = 512
+
 EPOCHS = 20
 LEARNING_RATE = 0.001
 
