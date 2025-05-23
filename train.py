@@ -2,11 +2,13 @@ import pandas as pd
 import os
 import chess
 import tensorflow as tf
+import tensorboard
 import numpy as np
 from process import construct_board_from_moves, move_to_number, number_to_move
 from tensorflow.keras import layers, Model
 import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split
+import datetime
 
 gpus = tf.config.experimental.list_physical_devices('GPU')
 if gpus:
@@ -38,15 +40,15 @@ if TEST_SMALL_MODEL == False:
     DROPOUT_RATE = 0.1
     BATCH_SIZE = 200
 else:
-    NUM_LAYERS = 3
-    D_MODEL = 512
+    NUM_LAYERS = 8
+    D_MODEL = 2048
     NUM_HEADS = 8
     DFF = 2048
     DROPOUT_RATE = 0.1
     BATCH_SIZE = 512
 
-EPOCHS = 20
-LEARNING_RATE = 0.001
+EPOCHS = 150
+LEARNING_RATE = 0.0001  # Reduced from 0.001
 
 def prepare_data(games_df, max_samples=10000):
     """Prepare chess data for training the transformer model."""
@@ -110,48 +112,60 @@ def create_chess_transformer_model(num_moves):
     inputs = layers.Input(shape=BOARD_SHAPE)
     
     # Convolutional layers to extract spatial features
-    x = layers.Conv2D(128, (3, 3), padding='same', activation='relu')(inputs)
+    x = layers.Conv2D(128, (3, 3), padding='same', activation='relu', 
+                      kernel_initializer='he_normal')(inputs)
     x = layers.BatchNormalization()(x)
     
     # Depthwise separable convolutions for efficiency
-    x = layers.SeparableConv2D(256, (3, 3), padding='same', activation='relu')(x)
+    x = layers.SeparableConv2D(256, (3, 3), padding='same', activation='relu',
+                              depthwise_initializer='he_normal',
+                              pointwise_initializer='he_normal')(x)
     x = layers.BatchNormalization()(x)
-    x = layers.SeparableConv2D(512, (3, 3), padding='same', activation='relu')(x)
+    x = layers.SeparableConv2D(512, (3, 3), padding='same', activation='relu',
+                              depthwise_initializer='he_normal',
+                              pointwise_initializer='he_normal')(x)
     x = layers.BatchNormalization()(x)
-    x = layers.SeparableConv2D(256, (3, 3), padding='same', activation='relu')(x)
+    x = layers.SeparableConv2D(256, (3, 3), padding='same', activation='relu',
+                              depthwise_initializer='he_normal',
+                              pointwise_initializer='he_normal')(x)
     x = layers.BatchNormalization()(x)
     
-    x = layers.Conv2D(D_MODEL // 64, (1, 1), activation='relu')(x)  # Reduce to manageable size
+    x = layers.Conv2D(D_MODEL // 64, (1, 1), activation='relu',
+                      kernel_initializer='he_normal')(x)
     
     # Reshape to sequence format for transformer
-    x = layers.Reshape((64, D_MODEL // 64))(x)  # (batch_size, 64, d_model//64)
+    x = layers.Reshape((64, D_MODEL // 64))(x)
     
-    # Project to full d_model dimension
-    x = layers.Dense(D_MODEL)(x)  # (batch_size, 64, d_model)
+    # Project to full d_model dimension with proper initialization
+    x = layers.Dense(D_MODEL, kernel_initializer='glorot_uniform')(x)
     
     # Add positional encoding
     positions = tf.range(start=0, limit=64, delta=1)
-    position_embeddings = layers.Embedding(64, D_MODEL)(positions)
+    position_embeddings = layers.Embedding(64, D_MODEL,
+                                         embeddings_initializer='uniform')(positions)
     x = x + position_embeddings
     
     x = layers.Dropout(DROPOUT_RATE)(x)
     
-    # Multiple transformer blocks
+    # Multiple transformer blocks with improved initialization
     for _ in range(NUM_LAYERS):
-        # Multi-head attention
+        # Multi-head attention with proper scaling
         attention_output = layers.MultiHeadAttention(
             num_heads=NUM_HEADS, 
             key_dim=D_MODEL // NUM_HEADS,
-            dropout=DROPOUT_RATE
+            dropout=DROPOUT_RATE,
+            kernel_initializer='glorot_uniform'
         )(x, x)
         
-        # Add & Norm
+        # Add & Norm with residual scaling
         x = layers.Add()([x, attention_output])
         x = layers.LayerNormalization(epsilon=1e-6)(x)
         
-        # Feed forward network
-        ffn_output = layers.Dense(DFF, activation='relu')(x)
-        ffn_output = layers.Dense(D_MODEL)(ffn_output)
+        # Feed forward network with proper initialization
+        ffn_output = layers.Dense(DFF, activation='relu',
+                                kernel_initializer='he_normal')(x)
+        ffn_output = layers.Dense(D_MODEL,
+                                kernel_initializer='glorot_uniform')(ffn_output)
         ffn_output = layers.Dropout(DROPOUT_RATE)(ffn_output)
         
         # Add & Norm
@@ -161,14 +175,17 @@ def create_chess_transformer_model(num_moves):
     # Global average pooling
     x = layers.GlobalAveragePooling1D()(x)
     
-    # Final dense layers
-    x = layers.Dense(512, activation='relu')(x)
+    # Final dense layers with proper initialization
+    x = layers.Dense(512, activation='relu',
+                     kernel_initializer='he_normal')(x)
     x = layers.Dropout(DROPOUT_RATE)(x)
-    x = layers.Dense(256, activation='relu')(x)
+    x = layers.Dense(256, activation='relu',
+                     kernel_initializer='he_normal')(x)
     x = layers.Dropout(DROPOUT_RATE)(x)
     
     # Output layer
-    outputs = layers.Dense(num_moves, activation='softmax')(x)
+    outputs = layers.Dense(num_moves, activation='softmax',
+                          kernel_initializer='glorot_uniform')(x)
     
     model = Model(inputs=inputs, outputs=outputs)
     return model
@@ -192,15 +209,55 @@ def train_model():
     # Create the model
     model = create_chess_transformer_model(len(move_to_number))
     
+    # Create optimizer with gradient clipping
+    optimizer = tf.keras.optimizers.Adam(
+        learning_rate=LEARNING_RATE,
+        clipnorm=1.0,  # Gradient clipping
+        epsilon=1e-7
+    )
+    
     # Compile the model
     model.compile(
-        optimizer=tf.keras.optimizers.Adam(LEARNING_RATE),
+        optimizer=optimizer,
         loss='categorical_crossentropy',
-        metrics=['accuracy']
+        metrics=['accuracy', 'top_k_categorical_accuracy']
     )
     
     # Model summary
     model.summary()
+    
+    # Create TensorBoard log directory with timestamp
+    log_dir = f"logs/chess_transformer_{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    
+    # TensorBoard callback
+    tensorboard_callback = tf.keras.callbacks.TensorBoard(
+        log_dir=log_dir,
+        histogram_freq=1,  # Log weight histograms every epoch
+        write_graph=True,  # Visualize the model graph
+        write_images=True,  # Log model weights as images
+        update_freq='epoch',  # Log metrics every epoch
+        profile_batch='500,520'  # Profile a few batches for performance analysis
+    )
+    
+    # Learning rate scheduler
+    lr_scheduler = tf.keras.callbacks.ReduceLROnPlateau(
+        monitor='val_loss',
+        factor=0.5,
+        patience=3,
+        min_lr=1e-7,
+        verbose=1
+    )
+    
+    # Custom callback to log additional metrics
+    class CustomMetricsCallback(tf.keras.callbacks.Callback):
+        def on_epoch_end(self, epoch, logs=None):
+            # Log current learning rate
+            lr = float(self.model.optimizer.learning_rate)
+            logs['learning_rate'] = lr
+            
+            # Log gradient norm (if available)
+            if hasattr(self.model.optimizer, 'clipnorm'):
+                logs['gradient_clipnorm'] = float(self.model.optimizer.clipnorm)
     
     # Train the model
     history = model.fit(
@@ -209,13 +266,19 @@ def train_model():
         epochs=EPOCHS,
         validation_data=(X_test, y_test),
         callbacks=[
-            tf.keras.callbacks.EarlyStopping(patience=5, restore_best_weights=True),
+            tf.keras.callbacks.EarlyStopping(patience=8, restore_best_weights=True),
             tf.keras.callbacks.ModelCheckpoint(
                 'chess_transformer_model.keras', 
                 save_best_only=True
-            )
+            ),
+            lr_scheduler,
+            tensorboard_callback,
+            CustomMetricsCallback()
         ]
     )
+    
+    print(f"\nTensorBoard logs saved to: {log_dir}")
+    print(f"To view in browser, run: tensorboard --logdir={log_dir}")
     
     # Plot training history
     plt.figure(figsize=(12, 4))
