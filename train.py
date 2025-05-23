@@ -26,7 +26,7 @@ else:
 print("TensorFlow version:", tf.__version__)
 print("GPU Available: ", tf.config.list_physical_devices('GPU'))
 print("Built with CUDA: ", tf.test.is_built_with_cuda())
-tf.keras.mixed_precision.set_global_policy('mixed_float16')
+# tf.keras.mixed_precision.set_global_policy('mixed_float16')  # Commented out to fix top_k issue
 
 # Constants
 TEST_SMALL_MODEL = True
@@ -40,12 +40,12 @@ if TEST_SMALL_MODEL == False:
     DROPOUT_RATE = 0.1
     BATCH_SIZE = 200
 else:
-    NUM_LAYERS = 8
+    NUM_LAYERS = 4
     D_MODEL = 2048
     NUM_HEADS = 8
     DFF = 2048
     DROPOUT_RATE = 0.1
-    BATCH_SIZE = 512
+    BATCH_SIZE = 256
 
 EPOCHS = 150
 LEARNING_RATE = 0.0001  # Reduced from 0.001
@@ -216,11 +216,15 @@ def train_model():
         epsilon=1e-7
     )
     
+    # Custom top-k accuracy metric that works with mixed precision
+    def top_5_accuracy(y_true, y_pred):
+        return tf.keras.metrics.top_k_categorical_accuracy(y_true, tf.cast(y_pred, tf.float32), k=5)
+    
     # Compile the model
     model.compile(
         optimizer=optimizer,
         loss='categorical_crossentropy',
-        metrics=['accuracy', 'top_k_categorical_accuracy']
+        metrics=['accuracy', top_5_accuracy]
     )
     
     # Model summary
