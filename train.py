@@ -4,7 +4,7 @@ import chess
 import tensorflow as tf
 import tensorboard
 import numpy as np
-from process import construct_board_from_moves, move_to_number, number_to_move
+from process import board_to_array
 from tensorflow.keras import layers, Model
 import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split
@@ -73,6 +73,18 @@ def prepare_data(games_df, max_samples=10000):
     X = []  # Board states
     y = []  # Next moves (as numbers)
     
+    # Create move dictionaries from the dataset
+    unique_moves = set()
+    for idx, row in games_df.iterrows():
+        moves = row['moves'].split()
+        for move in moves:
+            unique_moves.add(move)
+    
+    move_to_number = {move: i for i, move in enumerate(unique_moves)}
+    number_to_move = {i: move for i, move in enumerate(unique_moves)}
+    
+    print(f"Total unique moves in dataset: {len(unique_moves)}")
+    
     # Limit the number of games for memory efficiency
     sample_games = games_df.sample(min(len(games_df), max_samples))
     
@@ -88,19 +100,31 @@ def prepare_data(games_df, max_samples=10000):
             
             # Process game in chunks to create training examples
             valid_positions = 0
+            board = chess.Board()
+            
             for i in range(len(moves_list) - 1):
-                current_moves = moves_list[:i+1]
                 try:
-                    board_state, _ = construct_board_from_moves(current_moves)
-                    next_move = move_to_number.get(moves_list[i+1])
-                    
-                    if next_move is not None and board_state is not None:
-                        X.append(board_state)
-                        y.append(next_move)
-                        valid_positions += 1
-                except Exception as e:
+                    # Parse the current move
+                    move = moves_list[i]
+                    if move in move_to_number:
+                        # Get current board state
+                        board_state = board_to_array(board)
+                        next_move = move_to_number.get(moves_list[i+1])
+                        
+                        if next_move is not None:
+                            X.append(board_state)
+                            y.append(next_move)
+                            valid_positions += 1
+                        
+                        # Apply the move to the board
+                        chess_move = board.parse_san(move)
+                        board.push(chess_move)
+                    else:
+                        break
+                        
+                except (ValueError, AssertionError) as e:
                     # Skip this position if there's an error
-                    continue
+                    break
             
             if valid_positions > 0:
                 processed_games += 1
@@ -115,14 +139,16 @@ def prepare_data(games_df, max_samples=10000):
     
     if len(X) == 0:
         print("No valid training data generated!")
-        return None, None, None, None
+        return None, None, None, None, None, None
         
     X = np.array(X)  # Shape: (samples, 8, 8, 19)
     y = tf.keras.utils.to_categorical(y, num_classes=len(move_to_number))
     
     print(f"Generated {len(X)} training positions")
     
-    return train_test_split(X, y, test_size=0.2, random_state=42)
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    
+    return X_train, X_test, y_train, y_test, move_to_number, number_to_move
 
 def create_chess_transformer_model(num_moves):
     """Create a chess transformer model optimized for multi-channel board representation."""
@@ -219,7 +245,7 @@ def train_model():
         print("Failed to prepare training data. Exiting.")
         return None
         
-    X_train, X_test, y_train, y_test = result
+    X_train, X_test, y_train, y_test, move_to_number, number_to_move = result
     
     print(f"Training on {X_train.shape[0]} samples, validating on {X_test.shape[0]} samples")
     print(f"Board shape: {X_train.shape[1:]}, Moves: {y_train.shape[1]}")
@@ -325,9 +351,9 @@ def train_model():
     plt.savefig('chess_transformer_training_history.png')
     plt.show()
     
-    return model
+    return model, move_to_number, number_to_move
 
-def predict_next_move(model, board_state):
+def predict_next_move(model, board_state, move_to_number, number_to_move):
     """Predict the next chess move using the trained model."""
     # Reshape board to match model input (add batch dimension)
     board_input = board_state.reshape(1, 8, 8, 19)
@@ -342,9 +368,9 @@ def predict_next_move(model, board_state):
     return top_moves
 
 if __name__ == "__main__":
-    model = train_model()
+    model, move_to_number, number_to_move = train_model()
     
     # Example: prediction with a sample board
     # In practice, you would use a real board state
     sample_board = np.zeros((8, 8, 19))  # placeholder with 19 channels
-    print("Top predicted moves:", predict_next_move(model, sample_board))
+    print("Top predicted moves:", predict_next_move(model, sample_board, move_to_number, number_to_move))
