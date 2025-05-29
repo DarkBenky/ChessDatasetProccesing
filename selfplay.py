@@ -930,7 +930,7 @@ if __name__ == "__main__":
         
         # Set play_against_engine=True to make model play against Stockfish
         # Set play_against_engine=False for self-play (default)
-        game = ChessGame(model, engine_path, play_against_engine=False)  # Change this to switch modes
+        game = ChessGame(model, engine_path, play_against_engine=True)  # Change this to switch modes
         game.resetGame()
         game.play()
 
