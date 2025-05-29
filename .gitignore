@@ -2,4 +2,4 @@
 *.h5
 *.keras
 /logs
-*.csvhigh_rated_games.csv
+*.csv
