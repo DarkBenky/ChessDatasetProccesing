@@ -6,6 +6,10 @@ import chess.pgn
 import numpy as np
 import io
 import time
+import pickle
+import multiprocessing as mp
+from multiprocessing import Pool, Manager
+from tqdm import tqdm
 
 ELO_THRESHOLD = 1650
 
@@ -148,7 +152,334 @@ def board_to_array(board):
     
     return board_array
 
+def extract_extra_moves(depth=2):
+    # load moves_to_numbers.csv
+    with open('move_to_number.pkl', 'rb') as f:
+        move_to_number = pickle.load(f)
+    with open('number_to_move.pkl', 'rb') as f:
+        number_to_move = pickle.load(f)
+
+    initial_move_count = len(move_to_number)
+    print(f"Starting with {initial_move_count} known moves")
+
+    # extract games from high_rated_games.csv
+    games = pd.read_csv('high_rated_games.csv')
+    total_new_moves = 0
+    
+    for index, row in games.iterrows():
+        if index % 100 == 0:
+            print(f"Processing game {index + 1}/{len(games)} - Found {total_new_moves} new moves so far")
+            # periodically save progress
+            with open('move_to_number.pkl', 'wb') as f:
+                pickle.dump(move_to_number, f)
+            with open('number_to_move.pkl', 'wb') as f:
+                pickle.dump(number_to_move, f)
+
+        board = chess.Board()
+        # extract moves and add legal moves from each position
+        moves = row['moves'].split()
+        
+        for move_idx, move in enumerate(moves):
+            # Get all legal moves from current position
+            legal_moves = [board.san(m) for m in board.legal_moves]  # Use SAN notation
+            
+            # Add any new legal moves to our dictionary
+            for legal_move in legal_moves:
+                if legal_move not in move_to_number:
+                    move_number = len(move_to_number)
+                    move_to_number[legal_move] = move_number
+                    number_to_move[move_number] = legal_move
+                    total_new_moves += 1
+                    if total_new_moves % 1000 == 0:
+                        print(f"Added {total_new_moves} new moves so far...")
+            
+            # Now explore legal moves to specified depth
+            if depth > 0:
+                explore_legal_moves_recursive(board, move_to_number, number_to_move, depth, total_new_moves)
+            
+            # Play the actual game move
+            try:
+                board.push_san(move)
+            except ValueError as e:
+                print(f"Invalid move {move} in game {index}: {e}")
+                break  # Skip rest of this game
+        
+
+    # save the updated dictionaries
+    with open('move_to_number.pkl', 'wb') as f:
+        pickle.dump(move_to_number, f)
+    with open('number_to_move.pkl', 'wb') as f:
+        pickle.dump(number_to_move, f)
+    
+    final_move_count = len(move_to_number)
+    print(f"Completed processing {len(games)} games")
+    print(f"Total moves: {initial_move_count} → {final_move_count}")
+    print(f"Added {final_move_count - initial_move_count} new unique moves")
+
+def explore_legal_moves_recursive(board, move_to_number, number_to_move, depth, total_new_moves_ref):
+    """Recursively explore legal moves to find new move patterns"""
+    if depth <= 0:
+        return
+    
+    # Make a copy of the board to avoid affecting the main game
+    board_copy = board.copy()
+    legal_moves = list(board_copy.legal_moves)
+    
+    for i, move in enumerate(legal_moves):
+        # Play the move
+        board_copy.push(move)
+        
+        # Get legal moves from this new position
+        new_legal_moves = [board_copy.san(m) for m in board_copy.legal_moves]
+        
+        # Add any new moves we haven't seen before
+        for legal_move in new_legal_moves:
+            if legal_move not in move_to_number:
+                move_number = len(move_to_number)
+                move_to_number[legal_move] = move_number
+                number_to_move[move_number] = legal_move
+                # Note: We can't directly modify total_new_moves here due to scope
+        
+        # Recursively explore deeper (with reduced depth)
+        if depth > 1:
+            explore_legal_moves_recursive(board_copy, move_to_number, number_to_move, depth - 1, total_new_moves_ref)
+        
+        # Undo the move to try the next one
+        board_copy.pop()
+
+def extract_extra_moves_parallel(depth=2, num_processes=32, max_moves_per_level=8):
+    """Parallel version using all your CPU cores"""
+    # Load existing move dictionaries
+    with open('move_to_number.pkl', 'rb') as f:
+        move_to_number = pickle.load(f)
+    with open('number_to_move.pkl', 'rb') as f:
+        number_to_move = pickle.load(f)
+
+    initial_move_count = len(move_to_number)
+    print(f"Starting with {initial_move_count} known moves")
+
+    # Load games and split into chunks for parallel processing
+    games = pd.read_csv('high_rated_games.csv')
+    chunk_size = max(1, len(games) // num_processes)
+    game_chunks = [games[i:i + chunk_size] for i in range(0, len(games), chunk_size)]
+    
+    print(f"Processing {len(games)} games using {num_processes} cores")
+    print(f"Split into {len(game_chunks)} chunks of ~{chunk_size} games each")
+
+    # Use multiprocessing to process chunks in parallel with progress bar
+    with Pool(processes=num_processes) as pool:
+        # Create arguments for each process
+        args = [(chunk, depth, i, max_moves_per_level) for i, chunk in enumerate(game_chunks)]
+        
+        # Process chunks in parallel with progress bar
+        results = []
+        with tqdm(total=len(game_chunks), desc="Processing chunks", unit="chunk") as pbar:
+            for result in pool.starmap(process_game_chunk, args):
+                results.append(result)
+                pbar.update(1)
+    
+    # Merge results from all processes
+    print("Merging results from all processes...")
+    all_new_moves = set()
+    for chunk_moves in tqdm(results, desc="Merging results", unit="chunk"):
+        all_new_moves.update(chunk_moves)
+    
+    # Update move dictionaries with new unique moves
+    print("Updating move dictionaries...")
+    for move in tqdm(all_new_moves, desc="Adding new moves", unit="move"):
+        if move not in move_to_number:
+            move_number = len(move_to_number)
+            move_to_number[move] = move_number
+            number_to_move[move_number] = move
+    
+    # Save updated dictionaries
+    print("Saving updated dictionaries...")
+    with open('move_to_number.pkl', 'wb') as f:
+        pickle.dump(move_to_number, f)
+    with open('number_to_move.pkl', 'wb') as f:
+        pickle.dump(number_to_move, f)
+    
+    final_move_count = len(move_to_number)
+    print(f"Completed processing {len(games)} games")
+    print(f"Total moves: {initial_move_count} → {final_move_count}")
+    print(f"Added {final_move_count - initial_move_count} new unique moves")
+
+def process_game_chunk(game_chunk, depth, chunk_id, max_moves_per_level=8):
+    """Process a chunk of games and return new moves found"""
+    new_moves = set()
+    
+    # Create progress bar for this chunk
+    pbar = tqdm(
+        total=len(game_chunk), 
+        desc=f"Process {chunk_id}", 
+        position=chunk_id,
+        leave=False,
+        unit="game"
+    )
+    
+    for index, row in game_chunk.iterrows():
+        try:
+            board = chess.Board()
+            moves = row['moves'].split()
+            
+            for move_idx, move in enumerate(moves):
+                # Add legal moves from current position
+                legal_moves = [board.san(m) for m in board.legal_moves]
+                new_moves.update(legal_moves)
+                
+                # Explore legal moves to specified depth (LIMITED)
+                if depth > 0:
+                    explore_moves = explore_legal_moves_limited(board, depth, max_moves_per_level)
+                    new_moves.update(explore_moves)
+                
+                # Play the actual game move
+                try:
+                    board.push_san(move)
+                except ValueError:
+                    break  # Skip rest of invalid game
+                    
+        except Exception as e:
+            continue
+        
+        # Update progress bar
+        pbar.update(1)
+        pbar.set_postfix({"moves_found": len(new_moves)})
+    
+    pbar.close()
+    return new_moves
+
+def explore_legal_moves_limited(board, depth, max_moves_per_level=8):
+    """Efficiently explore legal moves with strict limits to prevent explosion"""
+    if depth <= 0:
+        return set()
+    
+    found_moves = set()
+    board_copy = board.copy()
+    legal_moves = list(board_copy.legal_moves)
+    
+    # CRITICAL: Limit moves explored to prevent exponential explosion
+    # Sort by move type to prioritize interesting moves
+    legal_moves = prioritize_moves(board_copy, legal_moves)
+    moves_to_explore = legal_moves[:max_moves_per_level]
+    
+    for move in moves_to_explore:
+        board_copy.push(move)
+        
+        # Add legal moves from this position
+        new_legal_moves = [board_copy.san(m) for m in board_copy.legal_moves]
+        found_moves.update(new_legal_moves)
+        
+        # Recursively explore deeper (with even stricter limits)
+        if depth > 1:
+            deeper_moves = explore_legal_moves_limited(
+                board_copy, 
+                depth - 1, 
+                max_moves_per_level=min(5, max_moves_per_level)  # Reduce limit at deeper levels
+            )
+            found_moves.update(deeper_moves)
+        
+        board_copy.pop()
+    
+    return found_moves
+
+def prioritize_moves(board, legal_moves):
+    """Prioritize interesting moves to explore first"""
+    move_priorities = []
+    
+    for move in legal_moves:
+        priority = 0
+        
+        # Prioritize captures
+        if board.is_capture(move):
+            priority += 100
+        
+        # Prioritize checks
+        board.push(move)
+        if board.is_check():
+            priority += 50
+        board.pop()
+        
+        # Prioritize promotions
+        if move.promotion:
+            priority += 75
+        
+        # Prioritize piece development (knights and bishops)
+        piece = board.piece_at(move.from_square)
+        if piece and piece.piece_type in [chess.KNIGHT, chess.BISHOP]:
+            priority += 25
+        
+        # Prioritize central squares
+        to_file = chess.square_file(move.to_square)
+        to_rank = chess.square_rank(move.to_square)
+        if 2 <= to_file <= 5 and 2 <= to_rank <= 5:  # Central squares
+            priority += 10
+        
+        # Add a unique identifier to break ties and make sorting stable
+        move_priorities.append((priority, str(move), move))  # Added str(move) for stable sorting
+    
+    # Sort by priority (descending), then by move string for stability
+    move_priorities.sort(key=lambda x: (-x[0], x[1]))  # Sort by -priority, then move string
+    return [move for priority, move_str, move in move_priorities]
+
+# Also add a memory-efficient streaming version for very large datasets
+def extract_extra_moves_streaming(depth=2, num_processes=16, chunk_size=1000):
+    """Memory-efficient version that processes games in streaming chunks"""
+    with open('move_to_number.pkl', 'rb') as f:
+        move_to_number = pickle.load(f)
+    
+    initial_count = len(move_to_number)
+    print(f"Starting with {initial_count} moves")
+    
+    # Get total number of rows for progress tracking
+    total_rows = sum(1 for _ in open('high_rated_games.csv')) - 1  # -1 for header
+    total_chunks = (total_rows + chunk_size - 1) // chunk_size
+    
+    # Process CSV in chunks to manage memory
+    all_new_moves = set()
+    
+    chunk_reader = pd.read_csv('high_rated_games.csv', chunksize=chunk_size)
+    
+    with tqdm(total=total_chunks, desc="Processing chunks", unit="chunk") as chunk_pbar:
+        for chunk_num, game_chunk in enumerate(chunk_reader, 1):
+            chunk_pbar.set_description(f"Processing chunk {chunk_num}")
+            
+            # Split chunk for parallel processing
+            mini_chunks = np.array_split(game_chunk, num_processes)
+            
+            with Pool(processes=num_processes) as pool:
+                args = [(chunk, depth, i) for i, chunk in enumerate(mini_chunks)]
+                results = pool.starmap(process_game_chunk, args)
+            
+            # Merge results from this chunk
+            chunk_moves = set()
+            for result in results:
+                chunk_moves.update(result)
+            all_new_moves.update(chunk_moves)
+            
+            chunk_pbar.update(1)
+            chunk_pbar.set_postfix({
+                "chunk_moves": len(chunk_moves),
+                "total_moves": len(all_new_moves)
+            })
+    
+    # Update dictionaries with all new moves
+    print("Updating move dictionary...")
+    for move in tqdm(all_new_moves, desc="Adding moves", unit="move"):
+        if move not in move_to_number:
+            move_to_number[move] = len(move_to_number)
+    
+    # Save updated dictionary
+    with open('move_to_number.pkl', 'wb') as f:
+        pickle.dump(move_to_number, f)
+    
+    final_count = len(move_to_number)
+    print(f"Completed! Moves: {initial_count} → {final_count}")
+    print(f"Added {final_count - initial_count} new moves")
+
+# Update your main execution
 if __name__ == "__main__":
+    extract_extra_moves_parallel(depth=2, num_processes=24, max_moves_per_level=8)
+
     # Download Lichess dataset only
     print("Downloading Lichess dataset...")
 
