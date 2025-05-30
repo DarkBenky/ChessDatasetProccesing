@@ -915,6 +915,7 @@ class ChessGame:
 
 
 if __name__ == "__main__":
+    # TODO Play multiple games in same session
     # TODO Add option to play agains the model
     def top_5_accuracy(y_true, y_pred):
         return tf.keras.metrics.sparse_top_k_categorical_accuracy(y_true, y_pred, k=5)

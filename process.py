@@ -478,7 +478,7 @@ def extract_extra_moves_streaming(depth=2, num_processes=16, chunk_size=1000):
 
 # Update your main execution
 if __name__ == "__main__":
-    extract_extra_moves_parallel(depth=2, num_processes=24, max_moves_per_level=8)
+    extract_extra_moves_parallel(depth=2, num_processes=16, max_moves_per_level=8)
 
     # Download Lichess dataset only
     print("Downloading Lichess dataset...")
