@@ -478,6 +478,12 @@ def extract_extra_moves_streaming(depth=2, num_processes=16, chunk_size=1000):
 
 # Update your main execution
 if __name__ == "__main__":
+    with open('move_to_number.pkl', 'rb') as f:
+        move_to_number = pickle.load(f)
+    with open('number_to_move.pkl', 'rb') as f:
+        number_to_move = pickle.load(f)
+    print(f"Loaded {len(move_to_number)} moves from existing dictionaries")
+
     extract_extra_moves_parallel(depth=2, num_processes=16, max_moves_per_level=8)
 
     # Download Lichess dataset only

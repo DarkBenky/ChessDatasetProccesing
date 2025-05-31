@@ -66,12 +66,12 @@ else:
     # DROPOUT_RATE = 0.3
     # BATCH_SIZE = 512
     # V3
-    NUM_LAYERS = 4
+    NUM_LAYERS = 6
     D_MODEL = 1024
     NUM_HEADS = 6
     DFF = 2048
     DROPOUT_RATE = 0.25
-    BATCH_SIZE = 400
+    BATCH_SIZE = 64
 
 
 EPOCHS = 150
@@ -467,6 +467,10 @@ def train_model(model=None):
     
     # Model summary
     model.summary()
+
+    # save model at start of training
+    model.save('chess_transformer_model.keras')
+    print("Initial model saved as 'chess_transformer_model.keras'")
     
     # Create TensorBoard log directory with timestamp
     log_dir = f"logs/chess_transformer_{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}"
