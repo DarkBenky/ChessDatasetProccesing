@@ -14,11 +14,16 @@ import datetime
 from functools import lru_cache
 import threading
 import queue
+import wandb
+import gc
+from collections import deque
 
-MOVE_LIMIT = 125
-GAMES_PER_TRAINING = 5  # Train after every 10 games
-LOOK_BACK = MOVE_LIMIT * GAMES_PER_TRAINING  # Look back at last N moves for training
-PARALLEL_GAMES = 2
+NUMBER_OF_RANDOM_SAMPLES = 1000  # Number of random samples to generate for training
+MOVE_LIMIT = 150
+GAMES_PER_TRAINING = 5 # Train after every 10 games
+LOOK_BACK = MOVE_LIMIT * GAMES_PER_TRAINING
+PARALLEL_GAMES = 5
+
 
 # Chess piece image filenames
 BISHOP_BLACK = "chessImages/BishupBlack.png"
@@ -59,12 +64,27 @@ class ChessGame:
         self.eval = []
         self.status = []
         # Remove ELO tracking
-        # self.bestElo = 500  # Default ELO rating
         # Load move dictionaries
         with open('move_to_number.pkl', 'rb') as f:
             self.move_to_number = pickle.load(f)
         with open('number_to_move.pkl', 'rb') as f:
             self.number_to_move = pickle.load(f)
+
+        # init wandb
+        wandb.init(
+            project="chess-ai-self-play", 
+            config={
+                "model": "chess_transformer",
+                "engine_path": engine_path,
+                "play_against_engine": play_against_engine,
+                "parallel_games_enabled": parallel_games_enabled,
+                "parallel_games": parallel_games,
+                "visual": visual,
+                "move_limit": MOVE_LIMIT,
+                "games_per_training": GAMES_PER_TRAINING,
+                "parallel_games_count": PARALLEL_GAMES
+            }
+        )
 
         print(f"Loaded move dictionaries with {len(self.move_to_number)} moves.")
         print(f"Loaded model with input shape: {self.model.input_shape} and output shape: {self.model.output_shape}")
@@ -773,18 +793,126 @@ class ChessGame:
             print("Training already in progress, skipping...")
 
     def train_model_threaded(self):
-        """Thread-safe training function that runs in background"""
-        # Don't set is_training here since it's already set in train_model()
+        """Thread-safe training function that runs in background, processing data in chunks."""
         self.training_complete.clear()
         
         try:
-            print("Starting model training in background thread...")
-            df = pd.read_csv('game_data.csv')
-            latest_games = df.tail(self.games_per_training * LOOK_BACK * PARALLEL_GAMES)
+            print("Starting model training in background thread (chunked data processing)...")
 
-            # Add periodic yield to prevent blocking
-            import time
+            CHUNK_SIZE = 10000  # Number of rows to read per chunk
+
+            # --- Phase 1: Collect Random Game Data (Chunked) ---
+            all_game_ids = set()
+            print("Collecting all game IDs for random sampling...")
+            try:
+                for chunk_idx, chunk in enumerate(pd.read_csv('game_data.csv', usecols=['game_id'], chunksize=CHUNK_SIZE)):
+                    all_game_ids.update(chunk['game_id'].unique())
+                    if chunk_idx % 10 == 0: # Print progress
+                        print(f"  Processed {chunk_idx * CHUNK_SIZE} rows for game IDs...")
+                        time.sleep(0.001) # Yield
+            except FileNotFoundError:
+                print("Error: game_data.csv not found.")
+                self.is_training = False
+                self.training_complete.set()
+                return
+            except Exception as e:
+                print(f"Error reading game_ids from game_data.csv: {e}")
+                self.is_training = False
+                self.training_complete.set()
+                return
+
+
+            random_games_df = pd.DataFrame()
+            if all_game_ids:
+                games_needed_for_random = NUMBER_OF_RANDOM_SAMPLES // MOVE_LIMIT
+                num_games_to_sample_random = min(games_needed_for_random, len(all_game_ids))
+                
+                if num_games_to_sample_random > 0:
+                    selected_random_game_ids = set(np.random.choice(
+                        list(all_game_ids),
+                        size=num_games_to_sample_random,
+                        replace=False
+                    ))
+                    print(f"Selected {len(selected_random_game_ids)} random game IDs. Collecting their data...")
+
+                    random_games_list = []
+                    for chunk_idx, chunk in enumerate(pd.read_csv('game_data.csv', chunksize=CHUNK_SIZE)):
+                        random_games_in_chunk = chunk[chunk['game_id'].isin(selected_random_game_ids)]
+                        if not random_games_in_chunk.empty:
+                            random_games_list.append(random_games_in_chunk)
+                        if chunk_idx % 10 == 0: # Print progress
+                            print(f"  Processed {chunk_idx * CHUNK_SIZE} rows for random game data...")
+                            time.sleep(0.001) # Yield
+                    
+                    if random_games_list:
+                        random_games_df = pd.concat(random_games_list, ignore_index=True)
+                    del random_games_list
+                    gc.collect()
+                    print(f"Collected {len(random_games_df)} random positions from {len(selected_random_game_ids)} games.")
+                else:
+                    print("Not enough unique games to sample for random data, or NUMBER_OF_RANDOM_SAMPLES is too low.")
+            else:
+                print("No game_ids found to sample for random data.")
+
+            del all_game_ids # Free memory
+            gc.collect()
+
+            # --- Phase 2: Collect Latest Game Data (Chunked) ---
+            print("Collecting latest game data...")
+            num_latest_rows = self.games_per_training * LOOK_BACK * PARALLEL_GAMES
             
+            # Estimate how many chunks roughly cover num_latest_rows, add a buffer
+            required_chunk_count_for_tail = max(1, (num_latest_rows // CHUNK_SIZE) + 2) # Ensure at least 1, typically 2-3 more than exact
+            tail_chunks_deque = deque(maxlen=required_chunk_count_for_tail)
+            
+            try:
+                for chunk_idx, chunk in enumerate(pd.read_csv('game_data.csv', chunksize=CHUNK_SIZE)):
+                    tail_chunks_deque.append(chunk)
+                    if chunk_idx % 10 == 0: # Print progress
+                        print(f"  Processed {chunk_idx * CHUNK_SIZE} rows for latest game data buffer...")
+                        time.sleep(0.001) # Yield
+            except FileNotFoundError: # Should have been caught earlier, but as a safeguard
+                print("Error: game_data.csv not found during latest games collection.")
+                self.is_training = False
+                self.training_complete.set()
+                return
+            except Exception as e:
+                print(f"Error reading game_data.csv for latest games: {e}")
+                self.is_training = False
+                self.training_complete.set()
+                return
+
+            latest_games_df = pd.DataFrame()
+            if tail_chunks_deque:
+                # Concatenate only the chunks in the deque (most recent ones)
+                concatenated_tail_chunks = pd.concat(list(tail_chunks_deque), ignore_index=True)
+                latest_games_df = concatenated_tail_chunks.tail(num_latest_rows)
+                del concatenated_tail_chunks # Free memory
+                gc.collect()
+                print(f"Collected {len(latest_games_df)} latest positions.")
+            else:
+                print("No data collected for latest games (game_data.csv might be empty or too small).")
+
+
+            # --- Phase 3: Combine DataFrames for Processing ---
+            if not latest_games_df.empty and not random_games_df.empty:
+                data_for_processing = pd.concat([latest_games_df, random_games_df], ignore_index=True)
+            elif not latest_games_df.empty:
+                data_for_processing = latest_games_df
+            elif not random_games_df.empty:
+                data_for_processing = random_games_df
+            else:
+                data_for_processing = pd.DataFrame()
+                
+            del latest_games_df, random_games_df # Free memory
+            gc.collect()
+
+            if data_for_processing.empty:
+                print("No data available for training after chunked processing.")
+                self.is_training = False
+                self.training_complete.set()
+                return
+
             # locals for speed
             move_to_number = self.move_to_number
             n_moves = len(move_to_number)
@@ -796,28 +924,41 @@ class ChessGame:
             moves_not_in_dict = 0
             total_moves_processed = 0
 
-            print(f"Processing {len(latest_games)} total game records...")
-            print(f"Number of unique games: {len(latest_games.groupby('game_id'))}")
+            print(f"Processing {len(data_for_processing)} total game records for training...")
+            unique_games_for_processing = data_for_processing['game_id'].nunique()
+            print(f"Number of unique games for processing: {unique_games_for_processing}")
+
+            wandb.log({
+                "preprocessing/total_records_for_training": len(data_for_processing),
+                "preprocessing/unique_games_for_training": unique_games_for_processing,
+            }, step=self.training_step)
 
             game_count = 0
-            for game_id, group in latest_games.groupby('game_id'):
+            # Process the combined DataFrame (which is now smaller than the full CSV)
+            for game_id, group in data_for_processing.groupby('game_id'):
                 game_count += 1
                 
-                # Yield control every 10 games to keep UI responsive
                 if game_count % 10 == 0:
-                    time.sleep(0.001)  # Very brief yield
-                
-                # per‐game counters
-                game_blunders = 0
-                game_mates = 0
+                    time.sleep(0.001) 
 
                 game_data = group.reset_index(drop=True)
                 temp_board = chess.Board()
 
                 for i, row in game_data.iterrows():
                     total_moves_processed += 1
-                    board = np.array(eval(row['boards']))
-                    move_str = row['moves']
+                    try:
+                        board_str = row['boards']
+                        # Ensure board_str is a string representation of a list/array before eval
+                        if not isinstance(board_str, str):
+                            print(f"Warning: 'boards' data is not a string for game_id {game_id}, row {i}. Skipping.")
+                            continue
+                        board = np.array(eval(board_str))
+                    except Exception as e:
+                        print(f"Error evaluating board string for game_id {game_id}, row {i}: {e}. Skipping.")
+                        moves_not_in_dict +=1 # Count as an issue
+                        continue
+                        
+                    move_str = str(row['moves']) # Ensure move_str is a string
 
                     # Convert move to SAN format if needed
                     try:
@@ -826,67 +967,75 @@ class ChessGame:
                         else:
                             try:
                                 uci_move = chess.Move.from_uci(move_str)
-                                if uci_move in temp_board.legal_moves:
+                                if uci_move in temp_board.legal_moves: # Check against current temp_board state
                                     final_move_str = temp_board.san(uci_move)
                                 else:
                                     moves_not_in_dict += 1
                                     continue
-                            except:
+                            except ValueError: # Invalid UCI move string
                                 moves_not_in_dict += 1
                                 continue
                         
+                        # Attempt to push the move to the temporary board
+                        # This must be done *after* final_move_str is determined and validated against legal moves
+                        current_board_fen_before_push = temp_board.fen()
                         try:
-                            if move_str in move_to_number:
-                                temp_board.push_san(move_str)
-                            else:
-                                temp_board.push(chess.Move.from_uci(move_str))
-                        except:
-                            break
+                            # Re-check legality for SAN moves if temp_board was modified by other game_id processing
+                            # For UCI, it was already checked. For SAN, it implies it was from dict.
+                            if final_move_str in move_to_number: # Assumed to be SAN
+                                # We need to parse SAN in context of current board
+                                parsed_move = temp_board.parse_san(final_move_str)
+                                temp_board.push(parsed_move)
+                            else: # Should be UCI already validated
+                                temp_board.push(chess.Move.from_uci(move_str)) # Use original move_str if it was UCI
+                        except Exception as push_error:
+                            # print(f"Error pushing move {final_move_str} (from {move_str}) to temp_board (FEN: {current_board_fen_before_push}): {push_error}. Skipping rest of game.")
+                            moves_not_in_dict += (len(game_data) - i) # Count remaining moves in this game as problematic
+                            break # Stop processing this game
                             
                     except Exception as e:
-                        print(f"Error processing move {move_str}: {e}")
+                        # print(f"Error processing move {move_str} for game_id {game_id}: {e}")
                         moves_not_in_dict += 1
                         continue
 
-                    eval_score = row['eval']
-                    if pd.isna(eval_score) or eval_score is None or not isinstance(eval_score, (int, float)):
-                        eval_score = 0
+                    eval_score_val = row['eval']
+                    if pd.isna(eval_score_val) or eval_score_val is None or not isinstance(eval_score_val, (int, float)):
+                        eval_score = 0.0
                     else:
                         try:
-                            eval_score = float(eval_score)
+                            eval_score = float(eval_score_val)
                             if np.isnan(eval_score) or np.isinf(eval_score):
-                                eval_score = 0
+                                eval_score = 0.0
                         except (ValueError, TypeError):
-                            eval_score = 0
+                            eval_score = 0.0
+                    
+                    if abs(eval_score) > 9950: # Using the already processed eval_score
+                        total_mates_found += 1
+                        eval_score = 9999.0 if eval_score > 0 else -9999.0
                     
                     move_quality = 0.25
                     
-                    if i > 1:
-                        prev_eval = game_data.iloc[i-2]['eval']
-                        if pd.notna(prev_eval) and isinstance(prev_eval, (int, float)):
+                    if i > 1: # Ensure there's a prev_eval at game_data.iloc[i-2]
+                        prev_eval_val = game_data.iloc[i-2]['eval'] # Use i-2 for the one before previous move's eval
+                        if pd.notna(prev_eval_val) and isinstance(prev_eval_val, (int, float)):
                             try:
-                                prev_eval = float(prev_eval)
-                                if not np.isnan(prev_eval) and not np.isinf(prev_eval):
+                                prev_eval = float(prev_eval_val)
+                                if not (np.isnan(prev_eval) or np.isinf(prev_eval)):
                                     eval_change = eval_score - prev_eval
-                                    # current eval -   previous eval = eval change
-                                    # 0            -   - 500         = 500
-                                    # 500          -   0             = 500
-                                    # -500         -   0             = -500
-                                    # 0            -   500           = -500
                                     
                                     if eval_change < -125:
-                                        # Scale penalty based on how bad the blunder was
-                                        penalty_multiplier = min(3.0, abs(eval_change) / 400.0)  # Cap at 3x penalty
+                                        total_blunders += 1
+                                        penalty_multiplier = min(3.0, abs(eval_change) / 400.0)
                                         base_penalty = 0.4
                                         total_penalty = base_penalty * penalty_multiplier
-                                        
                                         move_quality = max(0.001, move_quality - total_penalty)
-                                        print(f"Blunder detected: eval change {eval_change}, penalty: -{total_penalty:.2f}, quality: {move_quality:.2f}")
+                                        print(f"Blunder detected: {final_move_str}, penalty: {total_penalty:.3f}, eval change: {eval_change:.2f}, move quality: {move_quality:.3f}")
                                     else:
                                         move_quality = move_quality + (eval_change / 1000.0)
                                         move_quality = max(0.001, min(0.9, move_quality))
+                                        print(f"Eval change: {eval_change:.2f} for move {final_move_str}, adjusted move quality: {move_quality:.3f}")   
                             except (ValueError, TypeError):
-                                pass
+                                pass # prev_eval could not be converted to float
 
                     if final_move_str in move_to_number:
                         played_move_idx = move_to_number[final_move_str]
@@ -895,53 +1044,78 @@ class ChessGame:
                         target_dist[played_move_idx] = max(0.1, move_quality)
                         
                         try:
-                            temp_board_copy = chess.Board(temp_board.fen())
-                            temp_board_copy.pop()
-                            legal_moves_here = list(temp_board_copy.legal_moves)
+                            # Create a board state *before* the current move was made on temp_board
+                            # This requires temp_board to be accurate up to the move *before* final_move_str
+                            # The current temp_board has final_move_str already pushed. So, pop it.
+                            board_before_current_move = temp_board.copy()
+                            if board_before_current_move.move_stack: # Ensure there are moves to pop
+                                board_before_current_move.pop() 
+                                legal_moves_here = list(board_before_current_move.legal_moves)
                             
-                            for legal_move in legal_moves_here[:min(5, len(legal_moves_here))]:
-                                try:
-                                    legal_san = temp_board_copy.san(legal_move)
-                                    if legal_san in move_to_number and legal_san != final_move_str:
-                                        legal_idx = move_to_number[legal_san]
-                                        target_dist[legal_idx] = np.random.uniform(0.001, 0.01)
-                                except:
-                                    continue
-                        except:
-                            pass
+                                for legal_move_obj in legal_moves_here[:min(5, len(legal_moves_here))]:
+                                    try:
+                                        legal_san = board_before_current_move.san(legal_move_obj)
+                                        if legal_san in move_to_number and legal_san != final_move_str:
+                                            legal_idx = move_to_number[legal_san]
+                                            target_dist[legal_idx] = np.random.uniform(0.001, 0.01)
+                                    except: # Ignore errors in SAN conversion or dict lookup for these other moves
+                                        continue
+                        except Exception: # Catch all for safety with board manipulation
+                            pass 
                         
                         target_dist = target_dist / np.sum(target_dist)
                         
-                        boards.append(board)
+                        boards.append(board) # This is the board state *before* final_move_str
                         move_targets.append(target_dist)
                     else:
+                        # This case should be rare if final_move_str logic is correct
                         moves_not_in_dict += 1
                         continue
-
-            print(f"Total moves processed: {total_moves_processed}")
-            print(f"Total moves not in dictionary: {moves_not_in_dict}")
-            print(f"Training positions created: {len(boards)}")
-            print(f"Dictionary coverage: {((total_moves_processed - moves_not_in_dict) / total_moves_processed * 100):.1f}%")
-            print(f"Total checkmates found during training: {total_mates_found}")
-            print(f"Total blunders found during training: {total_blunders}")
             
+            del data_for_processing # Free memory
+            gc.collect()
+
+            print(f"Total moves processed from selected data: {total_moves_processed}")
+            print(f"Total moves not in dictionary / processing errors: {moves_not_in_dict}")
+            print(f"Training positions created: {len(boards)}")
+            if total_moves_processed > 0:
+                dict_coverage = ((total_moves_processed - moves_not_in_dict) / total_moves_processed * 100)
+                print(f"Dictionary coverage / successful processing: {dict_coverage:.1f}%")
+            else:
+                dict_coverage = 0
+                print("No moves processed successfully.")
+            print(f"Total checkmates found during training data prep: {total_mates_found}")
+            print(f"Total blunders found during training data prep: {total_blunders}")
+            
+            wandb.log({
+                "preprocessing/total_moves_processed_final": total_moves_processed,
+                "preprocessing/moves_not_in_dict_final": moves_not_in_dict,
+                "preprocessing/training_positions_created_final": len(boards),
+                "preprocessing/dictionary_coverage_pct_final": dict_coverage,
+                "preprocessing/total_checkmates_found_final": total_mates_found,
+                "preprocessing/total_blunders_found_final": total_blunders,
+                "preprocessing/checkmate_rate_final": total_mates_found / total_moves_processed if total_moves_processed > 0 else 0,
+                "preprocessing/blunder_rate_final": total_blunders / total_moves_processed if total_moves_processed > 0 else 0,
+            }, step=self.training_step)
+
             if len(boards) > 0:
                 X = np.array(boards)
                 y = np.array(move_targets)
                 
-                print(f"Training on {len(boards)} positions...")
+                del boards, move_targets # Free memory
+                gc.collect()
+
+                print(f"Training on {len(X)} positions...")
                 
-                # Configure model in the training thread
                 self.model.compile(
-                    optimizer=tf.keras.optimizers.Adam(learning_rate=0.0001),
+                    optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
                     loss='categorical_crossentropy',
                     metrics=['accuracy', 'top_k_categorical_accuracy']
                 )
                 
-                # Use a custom callback to periodically yield control
                 class ResponsiveCallback(tf.keras.callbacks.Callback):
                     def on_batch_end(self, batch, logs=None):
-                        if batch % 50 == 0:  # Yield every 50 batches
+                        if batch % 50 == 0: 
                             time.sleep(0.001)
                 
                 responsive_callback = ResponsiveCallback()
@@ -949,11 +1123,14 @@ class ChessGame:
                 history = self.model.fit(
                     X, y, 
                     epochs=3,
-                    batch_size=64,
+                    batch_size=64, # Consider reducing if OOM during fit
                     validation_split=0.1,
                     verbose=1,
                     callbacks=[self.tensorboard_callback, responsive_callback]
                 )
+                
+                del X, y # Free memory
+                gc.collect()
                 
                 val_loss = history.history.get('val_loss', [])
                 if val_loss and len(val_loss) > 1:
@@ -962,34 +1139,325 @@ class ChessGame:
                     else:
                         print(f"✅ Validation loss improved: {val_loss[0]:.4f} → {val_loss[-1]:.4f}")
                 
-                avg_move_quality = np.mean([np.max(target) for target in move_targets])
-                self.log_custom_metrics_updated(avg_move_quality, latest_games, total_mates_found, total_blunders)
-                
-                # Remove ELO estimation
-                # try:
-                #     estimated_elo = self.estimate_elo_fast()
-                #     if estimated_elo > self.bestElo:
-                #         self.bestElo = estimated_elo
-                #         print(f"New best ELO estimated: {self.bestElo:.0f}")
-                #     else:
-                #         print(f"ELO estimation did not improve: {estimated_elo:.0f} (best: {self.bestElo:.0f})")
-                # except Exception as e:
-                #     print(f"ELO estimation failed: {e}")
+                # avg_move_quality needs move_targets, which was deleted.
+                # If needed, recalculate or store it before deleting. For now, I'll comment it out from direct use here.
+                # avg_move_quality = np.mean([np.max(target) for target in move_targets]) # This would error
+                # self.log_custom_metrics_updated(avg_move_quality, data_for_processing, total_mates_found, total_blunders)
+                # Instead, pass relevant scalars if avg_move_quality cannot be recalculated easily.
+                # For now, log_custom_metrics_updated might need adjustment or to be called with what's available.
+                # Let's assume data_for_processing is not available here anymore for log_custom_metrics_updated.
+                # We'll log what we have from history.
                 
                 self.model.save('chess_transformer_model.keras')
-                print(f"Model trained on {len(boards)} positions and saved.")
+                print(f"Model trained on {len(history.history.get('loss', [])) * 64 if history.history.get('loss') else 'N/A'} effective positions and saved.") # Approximation
+                
+                # Log data to wandb
+                wandb_log_data = {
+                    # 'training/average_move_quality': avg_move_quality, # Needs re-calculation or different approach
+                    'training/total_moves_processed_in_batch': total_moves_processed, # This is from preprocessing
+                    'training/total_mates_found_in_batch_data': total_mates_found, # From preprocessing
+                    'training/total_blunders_in_batch_data': total_blunders, # From preprocessing
+                    'training/positions_trained_in_fit': len(history.history.get('loss', [])) * 64 if history.history.get('loss') else 0, # Approximation
+                    'training/loss': history.history.get('loss', [0])[-1],
+                    'training/val_loss': history.history.get('val_loss', [0])[-1],
+                    'training/accuracy': history.history.get('accuracy', [0])[-1],
+                    'training/val_accuracy': history.history.get('val_accuracy', [0])[-1],
+                }
+                if 'top_k_categorical_accuracy' in history.history:
+                    wandb_log_data['training/top_k_accuracy'] = history.history.get('top_k_categorical_accuracy', [0])[-1]
+                if 'val_top_k_categorical_accuracy' in history.history:
+                    wandb_log_data['training/val_top_k_accuracy'] = history.history.get('val_top_k_categorical_accuracy', [0])[-1]
+                
+                wandb.log(wandb_log_data, step=self.training_step)
                 self.training_step += 1
+
+
             else:
-                print("No valid training data found. Check move dictionary compatibility.")
+                print("No valid training positions created after processing. Check data and processing logic.")
             
         except Exception as e:
-            print(f"Training error: {e}")
+            print(f"Critical error in training thread: {e}")
             import traceback
             traceback.print_exc()
+            wandb.log({"training_thread_error": str(e)}, step=self.training_step)
         finally:
             self.is_training = False
             self.training_complete.set()
             print("Training thread completed.")
+    # def train_model_threaded(self):
+    #     """Thread-safe training function that runs in background"""
+    #     # Don't set is_training here since it's already set in train_model()
+    #     self.training_complete.clear()
+        
+    #     try:
+    #         print("Starting model training in background thread...")
+    #         df = pd.read_csv('game_data.csv')
+    #         latest_games = df.tail(self.games_per_training * LOOK_BACK * PARALLEL_GAMES)
+
+    #         # Add random samples from game_data.csv
+    #         if len(df) > 0:
+    #             random_game_ids = df['game_id'].unique()
+    #             if len(random_game_ids) > 0:
+    #                 games_needed = NUMBER_OF_RANDOM_SAMPLES // MOVE_LIMIT
+                    
+    #                 # Sample unique random game IDs (avoid duplicates)
+    #                 num_games_to_sample = min(games_needed, len(random_game_ids))
+    #                 selected_game_ids = np.random.choice(
+    #                     random_game_ids, 
+    #                     size=num_games_to_sample, 
+    #                     replace=False
+    #                 )
+                    
+    #                 # Get all games with selected IDs in one operation
+    #                 random_games = df[df['game_id'].isin(selected_game_ids)]
+                    
+    #                 if len(random_games) > 0:
+    #                     latest_games = pd.concat([latest_games, random_games], ignore_index=True)
+    #                     print(f"Added {len(random_games)} random positions from {len(selected_game_ids)} games")
+
+    #         del df  # Free memory
+
+    #         # Add periodic yield to prevent blocking
+    #         import time
+            
+    #         # locals for speed
+    #         move_to_number = self.move_to_number
+    #         n_moves = len(move_to_number)
+    #         boards, move_targets = [], []
+
+    #         # initialize counters
+    #         total_blunders = 0
+    #         total_mates_found = 0
+    #         moves_not_in_dict = 0
+    #         total_moves_processed = 0
+
+    #         print(f"Processing {len(latest_games)} total game records...")
+    #         print(f"Number of unique games: {len(latest_games.groupby('game_id'))}")
+
+    #         wandb.log({
+    #             "preprocessing/total_records": len(latest_games),
+    #             "preprocessing/unique_games": len(latest_games.groupby('game_id')),
+    #         }, step=self.training_step)
+
+    #         game_count = 0
+    #         for game_id, group in latest_games.groupby('game_id'):
+    #             game_count += 1
+                
+    #             # Yield control every 10 games to keep UI responsive
+    #             if game_count % 10 == 0:
+    #                 time.sleep(0.001)  # Very brief yield
+
+    #             game_data = group.reset_index(drop=True)
+    #             temp_board = chess.Board()
+
+    #             for i, row in game_data.iterrows():
+    #                 total_moves_processed += 1
+    #                 board = np.array(eval(row['boards']))
+    #                 move_str = row['moves']
+
+    #                 # Convert move to SAN format if needed
+    #                 try:
+    #                     if move_str in move_to_number:
+    #                         final_move_str = move_str
+    #                     else:
+    #                         try:
+    #                             uci_move = chess.Move.from_uci(move_str)
+    #                             if uci_move in temp_board.legal_moves:
+    #                                 final_move_str = temp_board.san(uci_move)
+    #                             else:
+    #                                 moves_not_in_dict += 1
+    #                                 continue
+    #                         except:
+    #                             moves_not_in_dict += 1
+    #                             continue
+                        
+    #                     try:
+    #                         if move_str in move_to_number:
+    #                             temp_board.push_san(move_str)
+    #                         else:
+    #                             temp_board.push(chess.Move.from_uci(move_str))
+    #                     except:
+    #                         break
+                            
+    #                 except Exception as e:
+    #                     print(f"Error processing move {move_str}: {e}")
+    #                     moves_not_in_dict += 1
+    #                     continue
+
+    #                 eval_score = row['eval']
+    #                 if abs(eval_score > 9950):
+    #                     # Checkmate detected
+    #                     total_mates_found += 1
+    #                     eval_score = 9999 if eval_score > 0 else -9999
+
+
+    #                 if pd.isna(eval_score) or eval_score is None or not isinstance(eval_score, (int, float)):
+    #                     eval_score = 0
+    #                 else:
+    #                     try:
+    #                         eval_score = float(eval_score)
+    #                         if np.isnan(eval_score) or np.isinf(eval_score):
+    #                             eval_score = 0
+    #                     except (ValueError, TypeError):
+    #                         eval_score = 0
+                    
+    #                 move_quality = 0.25
+                    
+    #                 if i > 1:
+    #                     prev_eval = game_data.iloc[i-2]['eval']
+    #                     if pd.notna(prev_eval) and isinstance(prev_eval, (int, float)):
+    #                         try:
+    #                             prev_eval = float(prev_eval)
+    #                             if not np.isnan(prev_eval) and not np.isinf(prev_eval):
+    #                                 eval_change = eval_score - prev_eval
+    #                                 # current eval -   previous eval = eval change
+    #                                 # 0            -   - 500         = 500
+    #                                 # 500          -   0             = 500
+    #                                 # -500         -   0             = -500
+    #                                 # 0            -   500           = -500
+                                    
+    #                                 if eval_change < -125:
+    #                                     total_blunders += 1
+    #                                     # Scale penalty based on how bad the blunder was
+    #                                     penalty_multiplier = min(3.0, abs(eval_change) / 400.0)  # Cap at 3x penalty
+    #                                     base_penalty = 0.4
+    #                                     total_penalty = base_penalty * penalty_multiplier
+                                        
+    #                                     move_quality = max(0.001, move_quality - total_penalty)
+    #                                     print(f"Blunder detected: eval change {eval_change}, penalty: -{total_penalty:.2f}, quality: {move_quality:.2f}")
+    #                                 else:
+    #                                     move_quality = move_quality + (eval_change / 1000.0)
+    #                                     move_quality = max(0.001, min(0.9, move_quality))
+    #                                     print(f"Move quality adjusted: {move_quality:.2f} (eval change: {eval_change})")
+    #                         except (ValueError, TypeError):
+    #                             pass
+
+    #                 if final_move_str in move_to_number:
+    #                     played_move_idx = move_to_number[final_move_str]
+                        
+    #                     target_dist = np.full(n_moves, 1e-6)
+    #                     target_dist[played_move_idx] = max(0.1, move_quality)
+                        
+    #                     try:
+    #                         temp_board_copy = chess.Board(temp_board.fen())
+    #                         temp_board_copy.pop()
+    #                         legal_moves_here = list(temp_board_copy.legal_moves)
+                            
+    #                         for legal_move in legal_moves_here[:min(5, len(legal_moves_here))]:
+    #                             try:
+    #                                 legal_san = temp_board_copy.san(legal_move)
+    #                                 if legal_san in move_to_number and legal_san != final_move_str:
+    #                                     legal_idx = move_to_number[legal_san]
+    #                                     target_dist[legal_idx] = np.random.uniform(0.001, 0.01)
+    #                             except:
+    #                                 continue
+    #                     except:
+    #                         pass
+                        
+    #                     target_dist = target_dist / np.sum(target_dist)
+                        
+    #                     boards.append(board)
+    #                     move_targets.append(target_dist)
+    #                 else:
+    #                     moves_not_in_dict += 1
+    #                     continue
+
+    #         print(f"Total moves processed: {total_moves_processed}")
+    #         print(f"Total moves not in dictionary: {moves_not_in_dict}")
+    #         print(f"Training positions created: {len(boards)}")
+    #         print(f"Dictionary coverage: {((total_moves_processed - moves_not_in_dict) / total_moves_processed * 100):.1f}%")
+    #         print(f"Total checkmates found during training: {total_mates_found}")
+    #         print(f"Total blunders found during training: {total_blunders}")
+            
+    #         # Enhanced preprocessing logging
+    #         wandb.log({
+    #             "preprocessing/total_moves_processed": total_moves_processed,
+    #             "preprocessing/moves_not_in_dict": moves_not_in_dict,
+    #             "preprocessing/training_positions_created": len(boards),
+    #             "preprocessing/dictionary_coverage_pct": ((total_moves_processed - moves_not_in_dict) / total_moves_processed * 100) if total_moves_processed > 0 else 0,
+    #             "preprocessing/total_checkmates_found": total_mates_found,
+    #             "preprocessing/total_blunders_found": total_blunders,
+    #             "preprocessing/checkmate_rate": total_mates_found / total_moves_processed if total_moves_processed > 0 else 0,
+    #             "preprocessing/blunder_rate": total_blunders / total_moves_processed if total_moves_processed > 0 else 0,
+    #         }, step=self.training_step)
+
+
+    #         if len(boards) > 0:
+    #             X = np.array(boards)
+    #             y = np.array(move_targets)
+                
+    #             print(f"Training on {len(boards)} positions...")
+                
+    #             # Configure model in the training thread
+    #             self.model.compile(
+    #                 optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
+    #                 loss='categorical_crossentropy',
+    #                 metrics=['accuracy', 'top_k_categorical_accuracy']
+    #             )
+                
+    #             # Use a custom callback to periodically yield control
+    #             class ResponsiveCallback(tf.keras.callbacks.Callback):
+    #                 def on_batch_end(self, batch, logs=None):
+    #                     if batch % 50 == 0:  # Yield every 50 batches
+    #                         time.sleep(0.001)
+                
+    #             responsive_callback = ResponsiveCallback()
+                
+    #             history = self.model.fit(
+    #                 X, y, 
+    #                 epochs=3,
+    #                 batch_size=64,
+    #                 validation_split=0.1,
+    #                 verbose=1,
+    #                 callbacks=[self.tensorboard_callback, responsive_callback]
+    #             )
+
+                
+    #             val_loss = history.history.get('val_loss', [])
+    #             if val_loss and len(val_loss) > 1:
+    #                 if val_loss[-1] > val_loss[0]:
+    #                     print("WARNING: Validation loss increased - consider reducing learning rate further")
+    #                 else:
+    #                     print(f"✅ Validation loss improved: {val_loss[0]:.4f} → {val_loss[-1]:.4f}")
+                
+    #             avg_move_quality = np.mean([np.max(target) for target in move_targets])
+    #             self.log_custom_metrics_updated(avg_move_quality, latest_games, total_mates_found, total_blunders)
+                
+                
+    #             self.model.save('chess_transformer_model.keras')
+    #             print(f"Model trained on {len(boards)} positions and saved.")
+    #             self.training_step += 1
+
+
+    #             # log data to wandb
+    #             wandb.log({
+    #                 'training/average_move_quality': avg_move_quality,
+    #                 'training/total_moves_processed': total_moves_processed,
+    #                 'training/total_mates_found': total_mates_found,
+    #                 'training/mates_per_game': total_mates_found / len(latest_games) if len(latest_games) > 0 else 0,
+    #                 'training/blunder_rate': total_blunders / total_moves_processed if total_moves_processed > 0 else 0,
+    #                 'training/total_blunders': total_blunders,
+    #                 'training/positions_trained': len(boards),
+    #                 'training/loss': history.history.get('loss', [0])[-1],
+    #                 'training/val_loss': history.history.get('val_loss', [0])[-1],
+    #                 'training/accuracy': history.history.get('accuracy', [0])[-1],
+    #                 'training/val_accuracy': history.history.get('val_accuracy', [0])[-1],
+    #                 'training/top_k_accuracy': history.history.get('top_k_categorical_accuracy', [0])[-1],
+    #                 'training/val_top_k_accuracy': history.history.get('val_top_k_categorical_accuracy', [0])[-1],
+    #             }, step=self.training_step)
+
+
+    #         else:
+    #             print("No valid training data found. Check move dictionary compatibility.")
+            
+    #     except Exception as e:
+    #         print(f"Training error: {e}")
+    #         import traceback
+    #         traceback.print_exc()
+    #     finally:
+    #         self.is_training = False
+    #         self.training_complete.set()
+    #         print("Training thread completed.")
 
     def train_model(self):
         """Start training in a separate thread to avoid blocking the main thread"""
@@ -1335,7 +1803,7 @@ if __name__ == "__main__":
         
         # Set play_against_engine=True to make model play against Stockfish
         # Set play_against_engine=False for self-play (default)
-        game = ChessGame(model, engine_path, play_against_engine=True, parallel_games_enabled = True, parallel_games = PARALLEL_GAMES)  # Change this to switch modes
+        game = ChessGame(model, engine_path, play_against_engine=False, parallel_games_enabled = True, parallel_games = PARALLEL_GAMES)  # Change this to switch modes
         game.resetGame()
         game.play()
 

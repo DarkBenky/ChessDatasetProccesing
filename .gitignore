@@ -3,3 +3,4 @@
 *.keras
 /logs
 *.csv
+/wandb
