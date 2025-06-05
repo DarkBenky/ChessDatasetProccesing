@@ -425,13 +425,13 @@ class ChessGame:
                 winning_margin = player_eval
                 
                 if player_eval > 500:  # Major advantage (5+ pawns)
-                    aggression_multiplier = 2.0
+                    aggression_multiplier = 1.5
                     print(f"Major advantage detected ({player_eval}): Maximum aggression mode")
                 elif player_eval > 300:  # Significant advantage (3+ pawns)
-                    aggression_multiplier = 1.6
+                    aggression_multiplier = 1.2
                     print(f"Significant advantage detected ({player_eval}): High aggression mode")
                 elif player_eval > 150:  # Moderate advantage (1.5+ pawns)
-                    aggression_multiplier = 1.3
+                    aggression_multiplier = 1.1
                     print(f"Moderate advantage detected ({player_eval}): Increased aggression mode")
         
         # Get all legal moves first
@@ -655,14 +655,14 @@ class ChessGame:
             # More focused move selection when winning
             if is_winning and winning_margin > 200:
                 # When winning significantly, be more decisive
-                top_k = min(2, len(legal_moves_in_dict))  # Very focused selection
+                top_k = min(1, len(legal_moves_in_dict))  # Very focused selection
                 chosen_move = legal_moves_in_dict[np.random.randint(top_k)][0]
                 print(f"Winning position: Selecting from top {top_k} moves")
             elif self.eval and abs(self.eval[-1] or 0) > 200:
-                top_k = min(3, len(legal_moves_in_dict))
+                top_k = min(2, len(legal_moves_in_dict))
                 chosen_move = legal_moves_in_dict[np.random.randint(top_k)][0]
             else:
-                top_k = min(5, len(legal_moves_in_dict))
+                top_k = min(3, len(legal_moves_in_dict))
                 chosen_move = legal_moves_in_dict[np.random.randint(top_k)][0]
             return chosen_move
         
