@@ -62,6 +62,7 @@ class ChessGame:
         self.boards = []
         self.moves = []
         self.eval = []
+        self.best_engine_moves = []
         self.status = []
         # Remove ELO tracking
         # Load move dictionaries
@@ -146,6 +147,10 @@ class ChessGame:
         self.checkmates_found = 0  # Track checkmates found in current game
         print("ChessGame initialized with model and engine.")
         
+        # Add variables to store best moves for visualization
+        self.current_engine_best_move = None
+        self.current_model_best_move = None
+        
         # spawn headless games if requested (only in main visual)
         if self.visual and self.parallel_games_enabled and self.parallel_games > 1:
             for _ in range(self.parallel_games - 1):
@@ -170,6 +175,7 @@ class ChessGame:
         self.moves = []
         self.eval = []
         self.status = []
+        self.best_engine_moves = []
         self.checkmates_found = 0  # Reset checkmate counter
         
         # load random starting position from high_rated_games.csv
@@ -204,6 +210,95 @@ class ChessGame:
                 piece = self.board.piece_at(square)
                 if piece:
                     self.draw_piece(piece, col * self.SQUARE_SIZE, row * self.SQUARE_SIZE)
+        
+        # Draw move highlights after pieces
+        self.draw_move_highlights()
+
+    def draw_move_highlights(self):
+        """Draw highlights for engine and model best moves"""
+        if not self.visual:
+            return
+
+        # Draw engine's best move in red using stored Move object
+        if self.current_engine_best_move:
+            try:
+                # contract move (from_square, to_square) to a chess.Move object
+                move = chess.Move.from_uci(self.current_engine_best_move)
+                self.draw_move_highlight(move, (255, 0, 0, 100), "Engine")
+            except Exception as e:
+                print(f"Error drawing engine move highlight: {e}")
+
+        # Draw model's best move in green
+        if self.current_model_best_move:
+            try:
+                self.draw_move_highlight(self.current_model_best_move, (0, 255, 0, 100), "Model")  # Green
+            except:
+                pass
+    
+    def draw_move_highlight(self, move, color, label):
+        """Draw a highlight for a specific move"""
+        # Create a surface with alpha for transparency
+        highlight_surface = pygame.Surface((self.SQUARE_SIZE, self.SQUARE_SIZE), pygame.SRCALPHA)
+        highlight_surface.fill(color)
+        
+        # Highlight from square
+        from_file = chess.square_file(move.from_square)
+        from_rank = chess.square_rank(move.from_square)
+        from_x = from_file * self.SQUARE_SIZE
+        from_y = (7 - from_rank) * self.SQUARE_SIZE
+        self.screen.blit(highlight_surface, (from_x, from_y))
+        
+        # Highlight to square
+        to_file = chess.square_file(move.to_square)
+        to_rank = chess.square_rank(move.to_square)
+        to_x = to_file * self.SQUARE_SIZE
+        to_y = (7 - to_rank) * self.SQUARE_SIZE
+        self.screen.blit(highlight_surface, (to_x, to_y))
+        
+        # Draw arrow from source to destination
+        start_center = (from_x + self.SQUARE_SIZE // 2, from_y + self.SQUARE_SIZE // 2)
+        end_center = (to_x + self.SQUARE_SIZE // 2, to_y + self.SQUARE_SIZE // 2)
+        
+        # Only draw arrow if it's not the same square
+        if start_center != end_center:
+            pygame.draw.line(self.screen, color[:3], start_center, end_center, 4)
+            
+            # Draw arrowhead
+            import math
+            dx = end_center[0] - start_center[0]
+            dy = end_center[1] - start_center[1]
+            if dx != 0 or dy != 0:
+                angle = math.atan2(dy, dx)
+                arrow_length = 15
+                arrow_angle = 0.5
+                
+                # Calculate arrowhead points
+                x1 = end_center[0] - arrow_length * math.cos(angle - arrow_angle)
+                y1 = end_center[1] - arrow_length * math.sin(angle - arrow_angle)
+                x2 = end_center[0] - arrow_length * math.cos(angle + arrow_angle)
+                y2 = end_center[1] - arrow_length * math.sin(angle + arrow_angle)
+                
+                pygame.draw.polygon(self.screen, color[:3], [end_center, (x1, y1), (x2, y2)])
+        
+        # Draw label
+        move_san = self.board.san(move)
+        label_text = f"{label}: {move_san}"
+        text_color = color[:3]
+        text = self.small_font.render(label_text, True, text_color)
+        
+        # Position label near the to square
+        label_x = to_x + 5
+        label_y = to_y - 20 if label == "Engine" else to_y + self.SQUARE_SIZE + 5
+        
+        # Ensure label stays on screen
+        if label_x + text.get_width() > self.BOARD_SIZE:
+            label_x = self.BOARD_SIZE - text.get_width()
+        if label_y < 0:
+            label_y = 5
+        elif label_y + text.get_height() > self.BOARD_SIZE:
+            label_y = self.BOARD_SIZE - text.get_height()
+            
+        self.screen.blit(text, (label_x, label_y))
 
     def draw_piece(self, piece, x, y):
         # Simple text representation of pieces
@@ -298,6 +393,23 @@ class ChessGame:
         
         # Get current evaluation to determine winning status
         current_eval = self.get_engine_evaluation() if not self.eval else (self.eval[-1] if self.eval[-1] is not None else 0)
+        
+        # Store model's best move for visualization (before applying bonuses)
+        if self.visual:
+            legal_moves = list(self.board.legal_moves)
+            best_model_score = -1
+            best_model_move = None
+            
+            for move in legal_moves:
+                move_san = self.board.san(move)
+                if move_san in self.move_to_number:
+                    move_index = self.move_to_number[move_san]
+                    score = predictions[0][move_index]
+                    if score > best_model_score:
+                        best_model_score = score
+                        best_model_move = move
+            
+            self.current_model_best_move = best_model_move
         
         # Determine if we're winning and by how much
         is_winning = False
@@ -609,35 +721,42 @@ class ChessGame:
                 # Analyze position with timeout
                 info = eval_engine.analyse(board, chess.engine.Limit(time=0.15))
                 score = info['score'].relative
+                best_move = info.get('pv', [None])[0]
+                # convert best move to algebraic notation
+                if best_move:
+                    best_move = board.san(best_move)
+                else:
+                    best_move = None
+                # Check if score is None
                 
                 # Handle mate scores
                 if score.is_mate():
                     mate_in = score.mate()
                     if mate_in is None:
-                        return 0  # Fallback for unknown mate
+                        return 0, None  # Fallback for unknown mate
                     
                     # Convert mate to large numeric value
                     if mate_in > 0:
-                        return 9999 - mate_in  # Closer mate = higher score
+                        return 9999 - mate_in, best_move  # Closer mate = higher score
                     else:
-                        return -9999 - mate_in  # Closer mate = lower score
+                        return -9999 - mate_in, best_move  # Closer mate = lower score
                 
                 # Handle regular centipawn scores
                 elif score.score() is not None:
                     cp_score = score.score()
-                    return max(-9999, min(9999, cp_score))
+                    return max(-9999, min(9999, cp_score)), best_move
                 else:
-                    return 0
+                    return 0, None  # Fallback for unknown score
                     
         except chess.engine.EngineTerminatedError:
             print("Engine terminated unexpectedly during evaluation")
-            return 0
+            return 0, None
         except chess.engine.EngineError as e:
             print(f"Engine error during evaluation: {e}")
-            return 0
+            return 0, None
         except Exception as e:
             print(f"Evaluation error: {e}")
-            return 0
+            return 0, None
 
     def play_elo_test_game(self, test_engine, max_moves=60):
         """Play a single quick game for ELO testing with better error handling"""
@@ -1037,31 +1156,46 @@ class ChessGame:
                             except (ValueError, TypeError):
                                 pass # prev_eval could not be converted to float
 
+                    # Get engine's best move if available for enhanced training
+                    engine_best_move_str = row.get('best_engine_moves', None) if 'best_engine_moves' in row else None
+                    
                     if final_move_str in move_to_number:
                         played_move_idx = move_to_number[final_move_str]
                         
                         target_dist = np.full(n_moves, 1e-6)
-                        target_dist[played_move_idx] = max(0.1, move_quality)
                         
-                        try:
-                            # Create a board state *before* the current move was made on temp_board
-                            # This requires temp_board to be accurate up to the move *before* final_move_str
-                            # The current temp_board has final_move_str already pushed. So, pop it.
-                            board_before_current_move = temp_board.copy()
-                            if board_before_current_move.move_stack: # Ensure there are moves to pop
-                                board_before_current_move.pop() 
-                                legal_moves_here = list(board_before_current_move.legal_moves)
+                        # Check if engine's best move is available and in dictionary
+                        if (engine_best_move_str and 
+                            engine_best_move_str != 'None' and 
+                            str(engine_best_move_str) in move_to_number):
                             
-                                for legal_move_obj in legal_moves_here[:min(5, len(legal_moves_here))]:
-                                    try:
-                                        legal_san = board_before_current_move.san(legal_move_obj)
-                                        if legal_san in move_to_number and legal_san != final_move_str:
-                                            legal_idx = move_to_number[legal_san]
-                                            target_dist[legal_idx] = np.random.uniform(0.001, 0.01)
-                                    except: # Ignore errors in SAN conversion or dict lookup for these other moves
-                                        continue
-                        except Exception: # Catch all for safety with board manipulation
-                            pass 
+                            # Assign all probability to engine's best move
+                            engine_move_idx = move_to_number[str(engine_best_move_str)]
+                            target_dist[engine_move_idx] = 1.0
+                            print(f"Using engine's best move: {engine_best_move_str} (instead of played move: {final_move_str})")
+                        else:
+                            # Use the played move with quality-based probability
+                            target_dist[played_move_idx] = max(0.1, move_quality)
+                            
+                            try:
+                                # Create a board state *before* the current move was made on temp_board
+                                # This requires temp_board to be accurate up to the move *before* final_move_str
+                                # The current temp_board has final_move_str already pushed. So, pop it.
+                                board_before_current_move = temp_board.copy()
+                                if board_before_current_move.move_stack: # Ensure there are moves to pop
+                                    board_before_current_move.pop() 
+                                    legal_moves_here = list(board_before_current_move.legal_moves)
+                                
+                                    for legal_move_obj in legal_moves_here[:min(10, len(legal_moves_here))]:
+                                        try:
+                                            legal_san = board_before_current_move.san(legal_move_obj)
+                                            if legal_san in move_to_number and legal_san != final_move_str:
+                                                legal_idx = move_to_number[legal_san]
+                                                target_dist[legal_idx] = np.random.uniform(0.001, 0.0125)
+                                        except Exception as E: # Ignore errors in SAN conversion or dict lookup for these other moves
+                                            pass
+                            except Exception as E: # Catch all for safety with board manipulation
+                                pass
                         
                         target_dist = target_dist / np.sum(target_dist)
                         
@@ -1144,9 +1278,6 @@ class ChessGame:
                 # avg_move_quality = np.mean([np.max(target) for target in move_targets]) # This would error
                 # self.log_custom_metrics_updated(avg_move_quality, data_for_processing, total_mates_found, total_blunders)
                 # Instead, pass relevant scalars if avg_move_quality cannot be recalculated easily.
-                # For now, log_custom_metrics_updated might need adjustment or to be called with what's available.
-                # Let's assume data_for_processing is not available here anymore for log_custom_metrics_updated.
-                # We'll log what we have from history.
                 
                 self.model.save('chess_transformer_model.keras')
                 print(f"Model trained on {len(history.history.get('loss', [])) * 64 if history.history.get('loss') else 'N/A'} effective positions and saved.") # Approximation
@@ -1443,7 +1574,7 @@ class ChessGame:
     #                 'training/accuracy': history.history.get('accuracy', [0])[-1],
     #                 'training/val_accuracy': history.history.get('val_accuracy', [0])[-1],
     #                 'training/top_k_accuracy': history.history.get('top_k_categorical_accuracy', [0])[-1],
-    #                 'training/val_top_k_accuracy': history.history.get('val_top_k_categorical_accuracy', [0])[-1],
+    #                 'training/val_top_k_categorical_accuracy': history.history.get('val_top_k_categorical_accuracy', [0])[-1],
     #             }, step=self.training_step)
 
 
@@ -1666,6 +1797,7 @@ class ChessGame:
                         game_winner = "Engine (Black)"
                     else:
                         game_winner = "Draw"
+
                 else:
                     if final_result == 1:
                         game_winner = "White"
@@ -1686,7 +1818,8 @@ class ChessGame:
                 'moves': [str(m) for m in self.moves],
                 'eval': cleaned_eval,  # Use cleaned evaluations
                 'status': self.status,
-                'game_id': game_ids
+                'game_id': game_ids,
+                'best_engine_moves': [str(m) for m in self.best_engine_moves],
             })
             
             # Append to existing CSV or create new one
@@ -1728,10 +1861,26 @@ class ChessGame:
         board_state = process.board_to_array(self.board)
         self.boards.append(board_state)
         
-        # Get engine evaluation before move
-        evaluation = self.get_engine_evaluation()
-        self.eval.append(evaluation)
+        # Store the board FEN when getting engine evaluation
+        evaluation_board_fen = self.board.fen()
         
+        # Get engine evaluation before move
+        evaluation, best_move = self.get_engine_evaluation()
+        self.eval.append(evaluation)
+        self.best_engine_moves.append(best_move)
+        
+        # Store engine's best move for visualization with the board state it was calculated for
+        if self.visual and best_move:
+            try:
+                # Create a board from the FEN when evaluation was done
+                eval_board = chess.Board(evaluation_board_fen)
+                parsed_move = eval_board.parse_san(best_move)
+                self.current_engine_best_move = str(parsed_move)
+                self.current_engine_best_move_board_fen = evaluation_board_fen
+            except:
+                self.current_engine_best_move = None
+                self.current_engine_best_move_board_fen = None
+    
         # Check for checkmate in current position
         if abs(evaluation) > 5000:  # Mate detected
             self.checkmates_found += 1
@@ -1803,7 +1952,7 @@ if __name__ == "__main__":
         
         # Set play_against_engine=True to make model play against Stockfish
         # Set play_against_engine=False for self-play (default)
-        game = ChessGame(model, engine_path, play_against_engine=False, parallel_games_enabled = True, parallel_games = PARALLEL_GAMES)  # Change this to switch modes
+        game = ChessGame(model, engine_path, play_against_engine=True, parallel_games_enabled = True, parallel_games = PARALLEL_GAMES)  # Change this to switch modes
         game.resetGame()
         game.play()
 
