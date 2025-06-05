@@ -1,0 +1,2 @@
+- [ ] Add data to csv about best move
+  - [ ] train on the best move based on stock fish 
