@@ -392,7 +392,7 @@ class ChessGame:
         predictions = self.model.predict(input_data, verbose=0)
         
         # Get current evaluation to determine winning status
-        current_eval = self.get_engine_evaluation() if not self.eval else (self.eval[-1] if self.eval[-1] is not None else 0)
+        current_eval = self.get_engine_evaluation()[0] if not self.eval else (self.eval[-1] if self.eval[-1] is not None else 0)
         
         # Store model's best move for visualization (before applying bonuses)
         if self.visual:
@@ -484,7 +484,7 @@ class ChessGame:
                             
                             if is_winning and base_capture_bonus > 0:
                                 print(f"Aggressive capture: {move_san}, base: {base_capture_bonus:.3f}, "
-                                      f"multiplier: {aggression_multiplier:.1f}, final: {capture_bonus:.3f}")
+                                    f"multiplier: {aggression_multiplier:.1f}, final: {capture_bonus:.3f}")
                 
                 # Check bonus - heavily boosted when winning
                 check_bonus = 0
@@ -656,14 +656,36 @@ class ChessGame:
             if is_winning and winning_margin > 200:
                 # When winning significantly, be more decisive
                 top_k = min(1, len(legal_moves_in_dict))  # Very focused selection
-                chosen_move = legal_moves_in_dict[np.random.randint(top_k)][0]
-                print(f"Winning position: Selecting from top {top_k} moves")
+                if top_k == 1:
+                    chosen_move = legal_moves_in_dict[0][0]
+                else:
+                    # Extract top moves and their probabilities
+                    top_moves = legal_moves_in_dict[:top_k]
+                    probabilities = np.array([move[2] for move in top_moves])
+                    # Apply softmax with high temperature for decisive selection
+                    probabilities = np.exp(probabilities * 5.0)  # High temperature for focus
+                    probabilities = probabilities / np.sum(probabilities)
+                    chosen_idx = np.random.choice(len(top_moves), p=probabilities)
+                    chosen_move = top_moves[chosen_idx][0]
+                print(f"Winning position: Selecting from top {top_k} moves with probability weighting")
             elif self.eval and abs(self.eval[-1] or 0) > 200:
                 top_k = min(2, len(legal_moves_in_dict))
-                chosen_move = legal_moves_in_dict[np.random.randint(top_k)][0]
+                top_moves = legal_moves_in_dict[:top_k]
+                probabilities = np.array([move[2] for move in top_moves])
+                # Apply softmax with moderate temperature
+                probabilities = np.exp(probabilities * 3.0)
+                probabilities = probabilities / np.sum(probabilities)
+                chosen_idx = np.random.choice(len(top_moves), p=probabilities)
+                chosen_move = top_moves[chosen_idx][0]
             else:
                 top_k = min(3, len(legal_moves_in_dict))
-                chosen_move = legal_moves_in_dict[np.random.randint(top_k)][0]
+                top_moves = legal_moves_in_dict[:top_k]
+                probabilities = np.array([move[2] for move in top_moves])
+                # Apply softmax with lower temperature for more exploration
+                probabilities = np.exp(probabilities * 2.0)
+                probabilities = probabilities / np.sum(probabilities)
+                chosen_idx = np.random.choice(len(top_moves), p=probabilities)
+                chosen_move = top_moves[chosen_idx][0]
             return chosen_move
         
         # Fallback: return a random legal move if no dictionary moves available
@@ -1952,7 +1974,7 @@ if __name__ == "__main__":
         
         # Set play_against_engine=True to make model play against Stockfish
         # Set play_against_engine=False for self-play (default)
-        game = ChessGame(model, engine_path, play_against_engine=True, parallel_games_enabled = True, parallel_games = PARALLEL_GAMES)  # Change this to switch modes
+        game = ChessGame(model, engine_path, play_against_engine=False, parallel_games_enabled = True, parallel_games = PARALLEL_GAMES)  # Change this to switch modes
         game.resetGame()
         game.play()
 
