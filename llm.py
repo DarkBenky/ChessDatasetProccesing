@@ -518,7 +518,7 @@ def train_llm_model(text_data, model=None):
     
     # Initialize wandb with large model configuration
     wandb.init(
-        project="llm-transformer-training",
+        project="llm-transformer-training-v2",
         config={
             "model_architecture": "large_transformer_llm",
             "model_size": "large",
@@ -539,7 +539,7 @@ def train_llm_model(text_data, model=None):
     )
     
     # Prepare data with larger sample size
-    result = prepare_text_data(text_data, max_samples=100_000)
+    result = prepare_text_data(text_data, max_samples=10_000_000)
     if result[0] is None:
         print("Failed to prepare training data. Exiting.")
         wandb.finish()
@@ -1307,14 +1307,7 @@ def preprocess_dataset_text(text):
 def load_text_from_file(file_path, chunk_size=1000, min_chunk_length=50):
     """
     Load text from a .txt file and split it into chunks for training.
-    
-    Args:
-        file_path (str): Path to the .txt file
-        chunk_size (int): Approximate number of words per chunk
-        min_chunk_length (int): Minimum length of text chunks to keep
-        
-    Returns:
-        list: List of text chunks ready for training
+    Enhanced to handle continuous text better.
     """
     print(f"Loading text from file: {file_path}")
     
@@ -1323,20 +1316,47 @@ def load_text_from_file(file_path, chunk_size=1000, min_chunk_length=50):
         return []
     
     try:
-        # Read the entire file
         with open(file_path, 'r', encoding='utf-8') as f:
             full_text = f.read()
         
         print(f"Loaded file with {len(full_text)} characters")
         
         # Basic preprocessing
-        # Remove excessive whitespace and normalize
-        full_text = re.sub(r'\n+', '\n', full_text)  # Normalize line breaks
-        full_text = re.sub(r'\s+', ' ', full_text)    # Normalize spaces
+        full_text = re.sub(r'\n+', '\n', full_text)
+        full_text = re.sub(r'\s+', ' ', full_text)
         
-        # Split into paragraphs first (by double newlines or similar)
-        paragraphs = re.split(r'\n\s*\n', full_text)
+        # Try multiple splitting strategies for continuous text
+        paragraphs = []
         
+        # Strategy 1: Split by double newlines (paragraphs)
+        if '\n\n' in full_text:
+            paragraphs = re.split(r'\n\s*\n', full_text)
+        
+        # Strategy 2: Split by sentence endings if no paragraphs
+        elif len(paragraphs) <= 1:
+            # Split by sentence endings followed by space and capital letter
+            sentences = re.split(r'[.!?]+\s+(?=[A-Z])', full_text)
+            # Group sentences into paragraph-sized chunks
+            current_para = ""
+            for sentence in sentences:
+                if len(current_para.split()) + len(sentence.split()) <= chunk_size // 2:
+                    current_para += sentence + ". "
+                else:
+                    if current_para.strip():
+                        paragraphs.append(current_para.strip())
+                    current_para = sentence + ". "
+            if current_para.strip():
+                paragraphs.append(current_para.strip())
+        
+        # Strategy 3: Fixed-size word chunks for truly continuous text
+        if len(paragraphs) <= 1:
+            words = full_text.split()
+            paragraphs = []
+            for i in range(0, len(words), chunk_size):
+                chunk_words = words[i:i + chunk_size]
+                paragraphs.append(' '.join(chunk_words))
+        
+        # Now process chunks as before
         texts = []
         current_chunk = ""
         current_word_count = 0
@@ -1367,7 +1387,8 @@ def load_text_from_file(file_path, chunk_size=1000, min_chunk_length=50):
             texts.append(current_chunk.strip())
         
         print(f"Split into {len(texts)} text chunks")
-        print(f"Average chunk length: {sum(len(t) for t in texts) / len(texts):.0f} characters")
+        if texts:
+            print(f"Average chunk length: {sum(len(t) for t in texts) / len(texts):.0f} characters")
         
         return texts
         
@@ -1450,7 +1471,7 @@ def interactive_conversation(model, word_to_id, id_to_word):
     
     # Initialize wandb for conversation logging
     wandb.init(
-        project="llm-transformer-training",
+        project="llm-transformer-training-v2",
         job_type="interactive_conversation",
         config={
             "vocab_size": len(word_to_id),
@@ -1652,6 +1673,10 @@ if __name__ == "__main__":
     
     # Dataset options - updated with better fallbacks for coding datasets
     DATASET_OPTIONS = {
+        # Local custom datasets
+        "extracted_conversations": {"subset": None, "description": "Extracted conversations dataset", "max_samples": 100000},
+        "rag_data": {"subset": None, "description": "RAG data", "max_samples": 100000},
+
         # General text datasets
         "wikitext": {"subset": "wikitext-2-raw-v1", "description": "Wikipedia articles (small)", "max_samples": 25000},
         "imdb": {"subset": None, "description": "Movie reviews", "max_samples": 100000},
@@ -1662,10 +1687,6 @@ if __name__ == "__main__":
         # Reasoning and NLI datasets
         "glue_mnli": {"subset": None, "description": "Natural Language Inference (GLUE MNLI)", "max_samples": 100000},
         "commonsense_qa": {"subset": "original", "description": "Public commonsense reasoning", "max_samples": 5000},
-        
-        # Local custom datasets
-        "extracted_conversations": {"subset": None, "description": "Extracted conversations dataset", "max_samples": 100000},
-        "rag_data": {"subset": None, "description": "RAG data", "max_samples": 100000},
         
         # CODING DATASETS (with better error handling)
         "github_code": {"subset": None, "description": "GitHub code repository", "max_samples": 100000},
@@ -1696,7 +1717,7 @@ if __name__ == "__main__":
     
     # Initialize master wandb run for the entire training process
     wandb.init(
-        project="llm-transformer-training",
+        project="llm-transformer-training-v2",
         config={
             "training_mode": "large_multi_dataset_comprehensive",
             "model_scale": "large",
@@ -1735,6 +1756,8 @@ if __name__ == "__main__":
                     chunk_size=500,  # Smaller chunks for conversation data
                     min_chunk_length=30  # Shorter minimum length for conversations
                 )
+                print(f"Loaded {len(texts)} conversation chunks")
+                print("Example chunk:", texts[-1])  # Show first 100 chars of first chunk
             else:
                 print(f"File {conversation_file_path} not found, skipping...")
                 texts = []
@@ -1748,6 +1771,7 @@ if __name__ == "__main__":
                     chunk_size=1000,
                     min_chunk_length=30
                 )
+                print(f"Loaded {len(texts)} RAG data chunks")
             else:
                 print(f"File {rag_data_file} not found, skipping…")
                 texts = []
@@ -1868,7 +1892,7 @@ if __name__ == "__main__":
         
         # Initialize wandb for text generation testing
         wandb.init(
-            project="llm-transformer-training",
+            project="llm-transformer-training-v2",
             config={
                 "trained_on_datasets": list(DATASET_OPTIONS.keys()),
                 "vocab_size": len(word_to_id),
