@@ -28,7 +28,7 @@ if gpus:
 class ModelLoader:
     """Class to handle model loading and text generation."""
     
-    def __init__(self, model_dir="streamlit_model"):
+    def __init__(self, model_dir="llm_transformer_complete_20250607_224747"):
         self.model_dir = model_dir
         self.model = None
         self.word_to_id = None
@@ -41,13 +41,39 @@ class ModelLoader:
             return False, "Model directory not found. Please train a model first."
         
         try:
-            # Load configuration
+            # Load configuration - try config.json first, then metadata.json
             config_path = os.path.join(self.model_dir, "config.json")
+            metadata_path = os.path.join(self.model_dir, "metadata.json")
+            
             if os.path.exists(config_path):
                 with open(config_path, 'r') as f:
                     self.config = json.load(f)
+            elif os.path.exists(metadata_path):
+                # Load from metadata.json and convert to config format
+                with open(metadata_path, 'r') as f:
+                    metadata = json.load(f)
+                
+                # Convert metadata to config format expected by Streamlit
+                self.config = {
+                    "vocab_size": metadata.get("vocab_size", 50000),
+                    "max_sequence_length": metadata.get("max_sequence_length", 1024),
+                    "model_parameters": metadata.get("model_parameters", {
+                        "num_layers": 4,
+                        "d_model": 512,
+                        "num_heads": 6,
+                        "dff": 1024,
+                        "dropout_rate": 0.1
+                    }),
+                    "special_tokens": metadata.get("special_tokens", {
+                        "pad_token": "<PAD>",
+                        "unk_token": "<UNK>",
+                        "start_token": "<START>",
+                        "end_token": "<END>"
+                    }),
+                    "tokenizers_available": False
+                }
             else:
-                return False, "Configuration file not found."
+                return False, "Configuration file (config.json or metadata.json) not found."
             
             # Load model
             model_path = os.path.join(self.model_dir, "model.keras")
@@ -65,6 +91,9 @@ class ModelLoader:
                     self.word_to_id = pickle.load(f)
                 with open(id_to_word_path, 'rb') as f:
                     self.id_to_word = pickle.load(f)
+                
+                # Update vocab_size in config to match actual tokenizer
+                self.config["vocab_size"] = len(self.word_to_id)
             else:
                 return False, "Tokenizer files not found."
             
@@ -210,7 +239,7 @@ def main():
         
         model_dir = st.text_input(
             "Model Directory", 
-            value="streamlit_model",
+            value="llm_transformer_complete_20250607_224747",
             help="Directory containing the trained model files"
         )
         
@@ -373,4 +402,20 @@ def main():
     )
 
 if __name__ == "__main__":
-    main()
+    # Check if running with streamlit
+    try:
+        # This will fail if not running with streamlit
+        import streamlit.runtime.scriptrunner as sr
+        if sr.get_script_run_ctx() is None:
+            raise RuntimeError("Not running with streamlit")
+        main()
+    except (ImportError, RuntimeError):
+        print("❌ This script must be run with Streamlit!")
+        print("🚀 To run the app, use the following command:")
+        print("   streamlit run interact.py")
+        print()
+        print("📝 Make sure you have streamlit installed:")
+        print("   pip install streamlit")
+        print()
+        print("🔧 If you want to run it in the browser, use:")
+        print("   streamlit run interact.py --server.port 8501")

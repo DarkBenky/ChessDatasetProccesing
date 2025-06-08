@@ -24,7 +24,7 @@ except ImportError:
     print("❌ Hugging Face datasets not available. Install with: pip install datasets")
 
 gpus = tf.config.experimental.list_physical_devices('GPU')
-if gups:
+if gpus:
     try:
         # Currently, memory growth needs to be the same across GPUs
         for gpu in gpus:
@@ -500,6 +500,18 @@ def generate_text(model, prompt, word_to_id, id_to_word, max_length=100, tempera
 
     return ' '.join(words)
 
+def get_reasoning_sample_texts():
+    """Fallback reasoning examples when commonsense_qa fails."""
+    return [
+        "All birds can fly. Penguins are birds. Can penguins fly? No, penguins cannot fly despite being birds.",
+        "If A implies B, and A is true, what can you conclude about B? B must also be true through logical deduction.",
+        "Socrates is a man, and all men are mortal. Is Socrates mortal? Yes, Socrates is mortal.",
+        "Question: What gets wetter as it dries? Answer: A towel gets wetter as it dries other things.",
+        "Logic puzzle: If some cats are dogs, and all dogs are animals, then some cats are animals. This is valid reasoning.",
+        "Cause and effect: If it rains heavily, then the ground becomes wet. It rained heavily, therefore the ground is wet.",
+        "Analogical reasoning: Books are to library as paintings are to museum - both store collections for public access."
+    ]
+
 def train_llm_model(text_data, model=None):
     """Train the LLM transformer model."""
     print(f"Starting LARGE LLM training with {len(text_data)} text samples")
@@ -921,14 +933,27 @@ def load_text_dataset(dataset_name="wikitext", subset="wikitext-2-raw-v1", max_s
                 dataset = load_dataset("sahil2801/CodeAlpaca-20k", split=split, trust_remote_code=True)
                 texts = []
                 for item in dataset[:max_samples]:
-                    # Handle different field structures
-                    instruction = item.get('instruction', '')
-                    input_text = item.get('input', '')
-                    output = item.get('output', '')
-                    
-                    if instruction and output:
-                        instruction_text = f"Instruction: {instruction}\n\nInput: {input_text}\n\nOutput: {output}"
-                        texts.append(instruction_text)
+                    # Handle different field structures - fix the string vs dict issue
+                    if isinstance(item, dict):
+                        instruction = item.get('instruction', '')
+                        input_text = item.get('input', '')
+                        output = item.get('output', '')
+                        
+                        if instruction and output:
+                            instruction_text = f"Instruction: {instruction}\n\nInput: {input_text}\n\nOutput: {output}"
+                            texts.append(instruction_text)
+                    elif hasattr(item, '__getitem__'):
+                        # Handle other data structures
+                        try:
+                            instruction = item['instruction'] if 'instruction' in item else ''
+                            input_text = item['input'] if 'input' in item else ''
+                            output = item['output'] if 'output' in item else ''
+                            
+                            if instruction and output:
+                                instruction_text = f"Instruction: {instruction}\n\nInput: {input_text}\n\nOutput: {output}"
+                                texts.append(instruction_text)
+                        except (KeyError, TypeError):
+                            continue
             except Exception as e:
                 print(f"Error with code_alpaca dataset: {e}")
                 texts = get_coding_sample_texts()
@@ -939,47 +964,39 @@ def load_text_dataset(dataset_name="wikitext", subset="wikitext-2-raw-v1", max_s
                 dataset = load_dataset("iamtarun/python_code_instructions_18k_alpaca", split=split, trust_remote_code=True)
                 texts = []
                 for item in dataset[:max_samples]:
-                    # Handle different possible field names
-                    instruction = item.get('instruction', item.get('prompt', ''))
-                    output = item.get('output', item.get('completion', item.get('response', '')))
-                    
-                    if instruction and output:
-                        code_text = f"Task: {instruction}\n\nSolution:\n{output}"
-                        texts.append(code_text)
+                    # Handle different possible field names and data types
+                    if isinstance(item, dict):
+                        instruction = item.get('instruction', item.get('prompt', ''))
+                        output = item.get('output', item.get('completion', item.get('response', '')))
+                        
+                        if instruction and output:
+                            code_text = f"Task: {instruction}\n\nSolution:\n{output}"
+                            texts.append(code_text)
+                    elif hasattr(item, '__getitem__'):
+                        try:
+                            # Try different field combinations
+                            instruction = ''
+                            output = ''
+                            
+                            for inst_field in ['instruction', 'prompt', 'task']:
+                                if inst_field in item:
+                                    instruction = item[inst_field]
+                                    break
+                            
+                            for out_field in ['output', 'completion', 'response', 'code']:
+                                if out_field in item:
+                                    output = item[out_field]
+                                    break
+                            
+                            if instruction and output:
+                                code_text = f"Task: {instruction}\n\nSolution:\n{output}"
+                                texts.append(code_text)
+                        except (KeyError, TypeError):
+                            continue
             except Exception as e:
                 print(f"Error with python_code_instructions dataset: {e}")
                 texts = get_coding_sample_texts()
-        
-        elif dataset_name == "code_contests":
-            # Code contests dataset
-            try:
-                dataset = load_dataset("deepmind/code_contests", split=split, trust_remote_code=True)
-                texts = []
-                for i, item in enumerate(dataset):
-                    if i >= max_samples:
-                        break
-                    # Handle the nested structure
-                    description = item.get('description', '')
-                    solutions = item.get('solutions', {})
-                    
-                    if description:
-                        problem_text = f"Problem: {description}\n\nSolutions:\n"
-                        
-                        # Handle different solution formats
-                        if isinstance(solutions, dict):
-                            solution_list = solutions.get('solution', [])
-                        else:
-                            solution_list = solutions if isinstance(solutions, list) else []
-                        
-                        for solution in solution_list[:3]:  # Limit to 3 solutions per problem
-                            problem_text += f"\n{solution}\n"
-                        
-                        if len(problem_text.strip()) > 100:
-                            texts.append(problem_text)
-            except Exception as e:
-                print(f"Error with code_contests dataset: {e}")
-                texts = get_coding_sample_texts()
-        
+
         elif dataset_name == "code_search_net":
             # CodeSearchNet - code with documentation - Fixed field handling
             try:
@@ -988,16 +1005,121 @@ def load_text_dataset(dataset_name="wikitext", subset="wikitext-2-raw-v1", max_s
                 for i, item in enumerate(dataset):
                     if i >= max_samples:
                         break
-                    # Handle different field names
-                    func_name = item.get('func_name', item.get('function_name', ''))
-                    docstring = item.get('docstring', item.get('documentation', ''))
-                    code = item.get('code', item.get('source_code', ''))
-                    
-                    if func_name and code:
-                        code_with_doc = f"Function: {func_name}\nDocstring: {docstring}\nCode:\n{code}"
-                        texts.append(code_with_doc)
+                    # Handle different field names and data types
+                    if isinstance(item, dict):
+                        func_name = item.get('func_name', item.get('function_name', ''))
+                        docstring = item.get('docstring', item.get('documentation', ''))
+                        code = item.get('code', item.get('source_code', ''))
+                        
+                        if func_name and code:
+                            code_with_doc = f"Function: {func_name}\nDocstring: {docstring}\nCode:\n{code}"
+                            texts.append(code_with_doc)
+                    elif hasattr(item, '__getitem__'):
+                        try:
+                            func_name = ''
+                            docstring = ''
+                            code = ''
+                            
+                            for name_field in ['func_name', 'function_name', 'name']:
+                                if name_field in item:
+                                    func_name = item[name_field]
+                                    break
+                            
+                            for doc_field in ['docstring', 'documentation', 'doc']:
+                                if doc_field in item:
+                                    docstring = item[doc_field]
+                                    break
+                            
+                            for code_field in ['code', 'source_code', 'function']:
+                                if code_field in item:
+                                    code = item[code_field]
+                                    break
+                            
+                            if code:  # Just need code, func_name optional
+                                code_with_doc = f"Function: {func_name}\nDocstring: {docstring}\nCode:\n{code}"
+                                texts.append(code_with_doc)
+                        except (KeyError, TypeError):
+                            continue
             except Exception as e:
                 print(f"Error with code_search_net dataset: {e}")
+                texts = get_coding_sample_texts()
+
+        elif dataset_name == "conala":
+            # CoNaLa - natural language to code - Fixed field handling
+            try:
+                dataset = load_dataset("neulab/conala", split=split, trust_remote_code=True)
+                texts = []
+                for item in dataset[:max_samples]:
+                    # Handle different field structures and data types
+                    if isinstance(item, dict):
+                        intent = item.get('intent', item.get('question', ''))
+                        snippet = item.get('snippet', item.get('code', ''))
+                        
+                        if intent and snippet:
+                            nl_to_code = f"Intent: {intent}\nCode: {snippet}"
+                            texts.append(nl_to_code)
+                    elif hasattr(item, '__getitem__'):
+                        try:
+                            intent = ''
+                            snippet = ''
+                            
+                            for intent_field in ['intent', 'question', 'description']:
+                                if intent_field in item:
+                                    intent = item[intent_field]
+                                    break
+                            
+                            for code_field in ['snippet', 'code', 'solution']:
+                                if code_field in item:
+                                    snippet = item[code_field]
+                                    break
+                            
+                            if intent and snippet:
+                                nl_to_code = f"Intent: {intent}\nCode: {snippet}"
+                                texts.append(nl_to_code)
+                        except (KeyError, TypeError):
+                            continue
+            except Exception as e:
+                print(f"Error with conala dataset: {e}")
+                texts = get_coding_sample_texts()
+
+        elif dataset_name == "code_contests":
+            # Code contests dataset - Handle memory issues
+            try:
+                # Try loading with streaming to avoid memory issues
+                dataset = load_dataset("deepmind/code_contests", split=split, streaming=True, trust_remote_code=True)
+                texts = []
+                for i, item in enumerate(dataset):
+                    if i >= max_samples:
+                        break
+                    # Handle the nested structure
+                    if isinstance(item, dict):
+                        description = item.get('description', '')
+                        solutions = item.get('solutions', {})
+                        
+                        if description:
+                            problem_text = f"Problem: {description}\n\nSolutions:\n"
+                            
+                            # Handle different solution formats
+                            if isinstance(solutions, dict):
+                                solution_list = solutions.get('solution', [])
+                            elif isinstance(solutions, list):
+                                solution_list = solutions
+                            else:
+                                solution_list = []
+                            
+                            for solution in solution_list[:2]:  # Limit to 2 solutions per problem
+                                if solution:
+                                    problem_text += f"\n{solution}\n"
+                            
+                            if len(problem_text.strip()) > 100:
+                                texts.append(problem_text)
+                    
+                    # Add progress indicator for large dataset
+                    if i % 1000 == 0 and i > 0:
+                        print(f"Processed {i} code contest problems...")
+                        
+            except Exception as e:
+                print(f"Error with code_contests dataset: {e}")
                 texts = get_coding_sample_texts()
         
         elif dataset_name == "apps":
@@ -1022,24 +1144,68 @@ def load_text_dataset(dataset_name="wikitext", subset="wikitext-2-raw-v1", max_s
             except Exception as e:
                 print(f"Error with apps dataset: {e}")
                 texts = get_coding_sample_texts()
-        
-        elif dataset_name == "conala":
-            # CoNaLa - natural language to code - Fixed field handling
-            try:
-                dataset = load_dataset("neulab/conala", split=split, trust_remote_code=True)
-                texts = []
-                for item in dataset[:max_samples]:
-                    # Handle different field structures
-                    intent = item.get('intent', item.get('question', ''))
-                    snippet = item.get('snippet', item.get('code', ''))
-                    
-                    if intent and snippet:
-                        nl_to_code = f"Intent: {intent}\nCode: {snippet}"
-                        texts.append(nl_to_code)
-            except Exception as e:
-                print(f"Error with conala dataset: {e}")
-                texts = get_coding_sample_texts()
             
+        elif dataset_name == "commonsense_qa":
+            # Public commonsense reasoning dataset
+            try:
+                ds = load_dataset("commonsense_qa", "original", split=split)
+                texts = []
+                for item in ds.select(range(min(len(ds), max_samples))):
+                    q = item["question"]
+                    opts = item["choices"]["text"]
+                    lbls = item["choices"]["label"]
+                    ans = item["answerKey"]
+                    txt = f"Question: {q}\nOptions:\n"
+                    for l, o in zip(lbls, opts):
+                        txt += f"  {l}: {o}\n"
+                    txt += f"Answer: {ans}"
+                    texts.append(txt)
+            except Exception:
+                texts = get_reasoning_sample_texts()
+
+        elif dataset_name == "glue_mnli":
+            # GLUE MNLI - Multi-Genre Natural Language Inference
+            try:
+                import pandas as pd
+                
+                # Load MNLI dataset using pandas and Hugging Face datasets
+                dataset = load_dataset("nyu-mll/glue", "mnli", split=split, trust_remote_code=True)
+                texts = []
+                
+                for i, item in enumerate(dataset):
+                    if i >= max_samples:
+                        break
+                    
+                    # Extract premise, hypothesis, and label
+                    premise = item.get('premise', '')
+                    hypothesis = item.get('hypothesis', '')
+                    label = item.get('label', -1)
+                    
+                    # Map label to text
+                    label_map = {0: 'entailment', 1: 'neutral', 2: 'contradiction'}
+                    label_text = label_map.get(label, 'unknown')
+                    
+                    if premise and hypothesis:
+                        # Format as natural language inference task
+                        nli_text = f"Premise: {premise}\nHypothesis: {hypothesis}\nRelation: {label_text}"
+                        texts.append(nli_text)
+                        
+                        # Also create a conversational format
+                        conversation_text = f"Given that {premise}, is it true that {hypothesis}? The relationship is {label_text}."
+                        texts.append(conversation_text)
+                
+            except Exception as e:
+                print(f"Error with glue_mnli dataset: {e}")
+                # Fallback to sample NLI data
+                texts = [
+                    "Premise: A person on a horse jumps over a broken fence. Hypothesis: A person is riding a horse. Relation: entailment",
+                    "Premise: Children are playing in the park. Hypothesis: Kids are having fun outside. Relation: neutral", 
+                    "Premise: The cat is sleeping on the couch. Hypothesis: The cat is running around. Relation: contradiction",
+                    "Given that a man is walking his dog in the park, is it true that the man owns a pet? The relationship is entailment.",
+                    "Given that it's raining outside, is it true that everyone is staying indoors? The relationship is neutral.",
+                    "Given that the store is closed, is it true that customers can shop there now? The relationship is contradiction."
+                ]
+
         else:
             print(f"Unknown dataset: {dataset_name}. Using sample data.")
             return get_sample_texts()
@@ -1488,24 +1654,28 @@ if __name__ == "__main__":
     DATASET_OPTIONS = {
         # General text datasets
         "wikitext": {"subset": "wikitext-2-raw-v1", "description": "Wikipedia articles (small)", "max_samples": 25000},
-        "imdb": {"subset": None, "description": "Movie reviews", "max_samples": 30000},
-        "ag_news": {"subset": None, "description": "News articles", "max_samples": 30000},
+        "imdb": {"subset": None, "description": "Movie reviews", "max_samples": 100000},
+        "ag_news": {"subset": None, "description": "News articles", "max_samples": 100000},
         "tiny_shakespeare": {"subset": None, "description": "Shakespeare texts", "max_samples": 15000},
-        "squad": {"subset": None, "description": "Question-answer pairs", "max_samples": 25000},
+        "squad": {"subset": None, "description": "Question-answer pairs", "max_samples": 100000},
+        
+        # Reasoning and NLI datasets
+        "glue_mnli": {"subset": None, "description": "Natural Language Inference (GLUE MNLI)", "max_samples": 100000},
+        "commonsense_qa": {"subset": "original", "description": "Public commonsense reasoning", "max_samples": 5000},
         
         # Local custom datasets
-        "extracted_conversations": {"subset": None, "description": "Extracted conversations dataset", "max_samples": 50000},
-        "rag_data": {"subset": None, "description": "RAG data", "max_samples": 50000},
+        "extracted_conversations": {"subset": None, "description": "Extracted conversations dataset", "max_samples": 100000},
+        "rag_data": {"subset": None, "description": "RAG data", "max_samples": 100000},
         
         # CODING DATASETS (with better error handling)
-        "github_code": {"subset": None, "description": "GitHub code repository", "max_samples": 50000},
+        "github_code": {"subset": None, "description": "GitHub code repository", "max_samples": 100000},
         "code_alpaca": {"subset": None, "description": "Code instruction dataset", "max_samples": 50000},
         "python_code_instructions": {"subset": None, "description": "Python coding instructions", "max_samples": 50000},
         "code_search_net": {"subset": "python", "description": "Code with documentation", "max_samples": 50000},
         "conala": {"subset": None, "description": "Natural language to code", "max_samples": 50000},
         
         # Optional coding datasets (may have access issues)
-        "codeparrot": {"subset": None, "description": "Python code dataset", "max_samples": 50000},
+        "codeparrot": {"subset": None, "description": "Python code dataset", "max_samples": 100000},
         "the_stack": {"subset": None, "description": "Large code dataset (Python)", "max_samples": 50000},
         "apps": {"subset": None, "description": "Coding competition problems", "max_samples": 50000},
         "code_contests": {"subset": None, "description": "Programming contests", "max_samples": 50000},
@@ -1615,7 +1785,7 @@ if __name__ == "__main__":
             texts = texts[:max_samples]
         
         dataset_stats[dataset_name] = {
-            "raw_count": len(texts),
+                       "raw_count": len(texts),
             "total_chars": sum(len(text) for text in texts),
             "avg_length": np.mean([len(text) for text in texts]) if texts else 0
         }
@@ -1736,6 +1906,11 @@ if __name__ == "__main__":
             "When we consider the facts",
             "It is important to understand",
             
+            # Natural Language Inference (GLUE MNLI style)
+            "Premise: The dog is barking loudly. Hypothesis:",
+            "Given that it's raining outside, is it true that",
+            "The relationship between these statements is",
+            
             # Conversation (extracted conversations style)
             "Hello, how are you",
             "What do you think about",
@@ -1755,7 +1930,7 @@ if __name__ == "__main__":
             "# Sort a list of",
             "# Create a web scraper"
         ]
-        
+
         generation_results = []
         print("\n🎭 Generated text samples:")
         print("-" * 60)
@@ -1783,7 +1958,8 @@ if __name__ == "__main__":
                         "News" if i < 9 else
                         "Literature" if i < 12 else
                         "QA" if i < 15 else
-                        "Conversation" if i < 25 else
+                        "NLI" if i < 18 else
+                        "Conversation" if i < 28 else
                         "Coding",
                         r["prompt"], 
                         r["generated_text"], 
@@ -1797,14 +1973,13 @@ if __name__ == "__main__":
         wandb.log({
             "text_generation/total_prompts_tested": len(generation_results),
             "text_generation/avg_response_length": np.mean([len(r["generated_text"]) for r in generation_results]),
-            "text_generation/categories_tested": 7  # Updated to include coding
+            "text_generation/categories_tested": 8  # Updated to include NLI
         })
+        
+        interactive_conversation(model, word_to_id, id_to_word)
         
         wandb.finish()
         
-        # Start interactive conversation mode
-        print("\n" + "="*60)
-        print("🎉 TRAINING COMPLETED SUCCESSFULLY!")
         print("="*60)
         print(f"✅ Model trained on {len(processed_texts)} texts from {len(DATASET_OPTIONS)} datasets (including coding datasets)")
         print(f"📖 Vocabulary size: {len(word_to_id):,} tokens")
@@ -1823,3 +1998,5 @@ if __name__ == "__main__":
     else:
         print("❌ Training failed!")
         print("Please check the error messages above and try again.")
+
+
