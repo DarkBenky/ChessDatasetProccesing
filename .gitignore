@@ -4,3 +4,6 @@
 /logs
 *.csv
 /wandb
+extracted_conversations.txt
+rag_data.txt
+*.txt

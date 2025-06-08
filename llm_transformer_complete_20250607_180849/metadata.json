@@ -1,0 +1,35 @@
+{
+  "vocab_size": 28547,
+  "max_sequence_length": 512,
+  "model_architecture": "llm_transformer",
+  "tensorflow_version": "2.19.0",
+  "save_date": "2025-06-07T18:08:51.417359",
+  "model_parameters": {
+    "num_layers": 16,
+    "d_model": 1024,
+    "num_heads": 8,
+    "dff": 2048,
+    "dropout_rate": 0.25,
+    "batch_size": 32,
+    "learning_rate": 0.0001,
+    "epochs": 25
+  },
+  "training_metrics": {
+    "best_val_loss": 3.8362107276916504,
+    "best_val_loss_epoch": 0,
+    "best_val_perplexity": 46.34951034634452,
+    "best_val_accuracy": 0.7621703743934631,
+    "best_val_accuracy_epoch": 0,
+    "best_train_loss": 3.7750604152679443,
+    "best_train_loss_epoch": 7,
+    "best_train_perplexity": 43.60014235043725,
+    "best_train_accuracy": 0.7659645080566406,
+    "best_train_accuracy_epoch": 7
+  },
+  "special_tokens": {
+    "pad_token": "<PAD>",
+    "unk_token": "<UNK>",
+    "start_token": "<START>",
+    "end_token": "<END>"
+  }
+}
