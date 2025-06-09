@@ -354,29 +354,12 @@ def main():
         # Generate response
         with st.chat_message("assistant", avatar="🤖"):
             with st.spinner("Thinking..."):
-                # Create context from recent conversation
-                recent_history = st.session_state.conversation_history[-6:]  # Last 3 exchanges
-                context_parts = []
-                for entry in recent_history[:-1]:  # Exclude the current prompt
-                    if entry['role'] == 'user':
-                        context_parts.append(f"Human: {entry['content']}")
-                    else:
-                        context_parts.append(f"AI: {entry['content']}")
-                
-                context = " ".join(context_parts) + f" Human: {prompt} AI:"
-                
-                # Generate response
+                # Generate response directly from the prompt without context
                 response = st.session_state.model_loader.generate_text(
-                    context, 
+                    prompt, 
                     max_length=max_length, 
                     temperature=temperature
                 )
-                
-                # Clean up response
-                if "AI:" in response:
-                    response = response.split("AI:")[-1].strip()
-                if "Human:" in response:
-                    response = response.split("Human:")[0].strip()
                 
                 # Display response with typing effect
                 response_placeholder = st.empty()

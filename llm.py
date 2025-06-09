@@ -45,8 +45,8 @@ TEST_SMALL_MODEL = True
 
 # Text processing constants
 MAX_SEQUENCE_LENGTH = 1024  # Increased from 512 for longer context
-VOCAB_SIZE = 50000  # Increased vocabulary size
-MIN_WORD_FREQ = 2  # Minimum frequency for word inclusion
+VOCAB_SIZE = 100000  # Increased from 50000 to handle more words
+MIN_WORD_FREQ = 1   # Reduced from 2 to include more words
 
 if TEST_SMALL_MODEL == False:
     # Very large model configuration for production
@@ -76,17 +76,24 @@ END_TOKEN = "<END>"
 
 def preprocess_text(text):
     """Clean and preprocess text data."""
-    # Convert to lowercase
+    # Less aggressive preprocessing to preserve more words
+    # Keep original case for proper nouns initially
+    original_text = text
+    
+    # Convert to lowercase but preserve some patterns
     text = text.lower()
     
-    # Remove extra whitespace
+    # Remove extra whitespace but preserve sentence structure
     text = re.sub(r'\s+', ' ', text)
     
-    # Add spaces around punctuation
+    # Add spaces around punctuation but preserve contractions
     text = re.sub(r'([.!?,:;])', r' \1 ', text)
     
-    # Remove special characters except basic punctuation
-    text = re.sub(r'[^a-zA-Z0-9\s.!?,:;]', '', text)
+    # Keep more characters including numbers, dates, and common symbols
+    text = re.sub(r'[^\w\s.!?,:;-]', '', text)
+    
+    # Preserve common abbreviations and dates
+    text = re.sub(r'\b(\w+)\s+(\d+)\s*,\s*(\d+)\b', r'\1 \2, \3', text)  # "Feb 24, 2022"
     
     return text.strip()
 
@@ -103,8 +110,7 @@ except ImportError:
 def build_tokenizer(texts, vocab_size=VOCAB_SIZE, min_freq=MIN_WORD_FREQ):
     """Build tokenizer from text data (BPE if available)."""
     if TOKENIZERS_AVAILABLE:
-        print("Building BPE subword tokenizer…")
-        # train a Byte-Level BPE on your corpus
+        print("Building BPE subword tokenizer...")
         tokenizer = ByteLevelBPETokenizer()
         tokenizer.train_from_iterator(
             texts,
@@ -112,22 +118,38 @@ def build_tokenizer(texts, vocab_size=VOCAB_SIZE, min_freq=MIN_WORD_FREQ):
             min_frequency=min_freq,
             special_tokens=[PAD_TOKEN, UNK_TOKEN, START_TOKEN, END_TOKEN]
         )
-        # save vocab/merges for later reuse
         os.makedirs("tokenizer_bpe", exist_ok=True)
         tokenizer.save_model("tokenizer_bpe")
         return tokenizer
 
-    # fallback to your original word-level
-    print("Building word-level tokenizer…")
+    # Improved word-level tokenizer
+    print("Building enhanced word-level tokenizer...")
     all_words = []
     for t in texts:
-        all_words.extend(preprocess_text(t).split())
+        # Use the same preprocessing as during training
+        processed_text = preprocess_text(t)
+        words = processed_text.split()
+        all_words.extend(words)
+    
+    # Count word frequencies
     counts = Counter(all_words)
+    print(f"Found {len(counts)} unique words before filtering")
+    
+    # Include more words by lowering frequency threshold
     filtered = [w for w, c in counts.items() if c >= min_freq]
+    print(f"After filtering (min_freq={min_freq}): {len(filtered)} words")
+    
+    # Sort by frequency and take top words
     most_common = sorted(filtered, key=lambda w: counts[w], reverse=True)[:vocab_size-4]
+    
+    # Build vocabulary with special tokens first
     vocab = [PAD_TOKEN, UNK_TOKEN, START_TOKEN, END_TOKEN] + most_common
-    word_to_id = {w:i for i,w in enumerate(vocab)}
-    id_to_word = {i:w for w,i in word_to_id.items()}
+    word_to_id = {w: i for i, w in enumerate(vocab)}
+    id_to_word = {i: w for w, i in word_to_id.items()}
+    
+    print(f"Final vocabulary size: {len(vocab)}")
+    print(f"Sample words: {most_common[:20]}")
+    
     return (word_to_id, id_to_word)
 
 def tokenize_text(text, tokenizer, max_length=MAX_SEQUENCE_LENGTH):
@@ -157,7 +179,7 @@ def tokenize_text(text, tokenizer, max_length=MAX_SEQUENCE_LENGTH):
     pad = word_to_id[PAD_TOKEN]
     return ids + [pad] * (max_length - len(ids))
 
-def prepare_text_data(texts, max_samples=400_000):  # Increased max samples
+def prepare_text_data(texts, max_samples=400_000):
     """Prepare text data for training the LLM."""
     print("Preparing text data...")
     
@@ -172,17 +194,25 @@ def prepare_text_data(texts, max_samples=400_000):  # Increased max samples
         tokenizer = (word_to_id, id_to_word)
         tokenizer_saved = True
         print(f"Loaded tokenizer with {len(word_to_id)} tokens")
+        
+        # Check if common words are in vocabulary
+        test_words = ["russia", "ukraine", "invasion", "february", "24", "2022", "general", "forces"]
+        missing_words = [w for w in test_words if w not in word_to_id]
+        if missing_words:
+            print(f"WARNING: Missing common words in vocabulary: {missing_words}")
+            print("Consider rebuilding tokenizer with more diverse training data")
+        
     else:
         print("Building new tokenizer...")
-        # Sample texts for tokenizer building if dataset is large
-        sample_texts = texts[:min(len(texts), 200_000)]  # Increased sample size
+        # Use more samples for better vocabulary coverage
+        sample_texts = texts[:min(len(texts), 500_000)]
         tokenizer = build_tokenizer(sample_texts)
         
         # Extract word_to_id and id_to_word from tokenizer
         if isinstance(tokenizer, tuple):
             word_to_id, id_to_word = tokenizer
         else:
-            # Handle BPE tokenizer case - create mappings
+            # Handle BPE tokenizer case
             vocab_size = tokenizer.get_vocab_size()
             word_to_id = {}
             id_to_word = {}
@@ -1276,30 +1306,27 @@ def preprocess_dataset_text(text):
     if not isinstance(text, str):
         return ""
     
-    # Remove excessive whitespace and newlines
+    # Less aggressive cleaning to preserve more information
     text = re.sub(r'\n+', ' ', text)
     text = re.sub(r'\s+', ' ', text)
     
-    # Remove URLs
-    text = re.sub(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', '', text)
+    # Remove URLs but keep the text readable
+    text = re.sub(r'http[s]?://\S+', '[URL]', text)
     
-    # Remove email addresses
-    text = re.sub(r'\S+@\S+', '', text)
+    # Replace email addresses with placeholder
+    text = re.sub(r'\S+@\S+', '[EMAIL]', text)
     
-    # Remove excessive punctuation
-    text = re.sub(r'[!]{2,}', '!', text)
-    text = re.sub(r'[?]{2,}', '?', text)
-    text = re.sub(r'[.]{3,}', '...', text)
+    # Keep more punctuation and formatting
+    text = re.sub(r'[!]{3,}', '!!', text)
+    text = re.sub(r'[?]{3,}', '??', text)
+    text = re.sub(r'[.]{4,}', '...', text)
     
-    # Remove text within parentheses or brackets that might be metadata
-    text = re.sub(r'\([^)]*\)', '', text)
-    text = re.sub(r'\[[^\]]*\]', '', text)
+    # Don't remove parentheses and brackets as they might contain important info
     
-    # Basic cleaning
     text = text.strip()
     
-    # Skip very short or very long texts
-    if len(text) < 20 or len(text) > 10000:
+    # Be less restrictive with length limits
+    if len(text) < 10 or len(text) > 20000:
         return ""
     
     return text
