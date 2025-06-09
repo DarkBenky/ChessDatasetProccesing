@@ -7,3 +7,4 @@
 extracted_conversations.txt
 rag_data.txt
 *.txt
+*.pkl

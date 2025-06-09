@@ -1,0 +1,18 @@
+{
+  "vocab_size": 50000,
+  "max_sequence_length": 1024,
+  "model_parameters": {
+    "num_layers": 4,
+    "d_model": 512,
+    "num_heads": 6,
+    "dff": 1024,
+    "dropout_rate": 0.1
+  },
+  "special_tokens": {
+    "pad_token": "<PAD>",
+    "unk_token": "<UNK>",
+    "start_token": "<START>",
+    "end_token": "<END>"
+  },
+  "tokenizers_available": true
+}
