@@ -649,6 +649,106 @@ def train_llm_model(text_data, model=None):
     # Create TensorBoard log directory
     log_dir = f"logs/llm_transformer_{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}"
     
+    # Define test prompts for epoch evaluation
+    test_prompts = [
+        "The future of artificial intelligence",
+        "Once upon a time",
+        "Python is a programming language",
+        "The weather today is",
+        "In the field of science",
+        "def calculate(x, y):",
+        "Machine learning models",
+        "Climate change is"
+        "is fico good prime minister? I think to he is terrible(he collaborates with russia and putin, he is a traitor to the country, he is a criminal, he is a liar, he is a thief, he is a corrupt politician,",
+    ]
+    
+    # Custom callback for text generation testing after each epoch
+    class TextGenerationCallback(tf.keras.callbacks.Callback):
+        def __init__(self, test_prompts, word_to_id, id_to_word):
+            super().__init__()
+            self.test_prompts = test_prompts
+            self.word_to_id = word_to_id
+            self.id_to_word = id_to_word
+            self.generation_results = []
+            
+        def on_epoch_end(self, epoch, logs=None):
+            print(f"\n🧪 Testing text generation after epoch {epoch + 1}...")
+            
+            epoch_results = []
+            generation_data = []
+            
+            for i, prompt in enumerate(self.test_prompts):
+                try:
+                    # Generate text with different temperatures
+                    for temp in [0.5, 0.8, 1.0]:
+                        generated_text = generate_text(
+                            self.model, 
+                            prompt, 
+                            self.word_to_id, 
+                            self.id_to_word, 
+                            max_length=50, 
+                            temperature=temp
+                        )
+                        
+                        # Clean up generated text
+                        if prompt.lower() in generated_text.lower():
+                            # Remove the prompt from the beginning if it's repeated
+                            generated_text = generated_text[len(prompt):].strip()
+                        
+                        result = {
+                            "epoch": epoch + 1,
+                            "prompt": prompt,
+                            "temperature": temp,
+                            "generated_text": generated_text,
+                            "prompt_index": i,
+                            "text_length": len(generated_text),
+                            "word_count": len(generated_text.split())
+                        }
+                        
+                        epoch_results.append(result)
+                        generation_data.append([
+                            epoch + 1, 
+                            prompt, 
+                            temp, 
+                            generated_text,
+                            len(generated_text),
+                            len(generated_text.split())
+                        ])
+                        
+                        print(f"  🌡️ T={temp}: '{prompt}' → '{generated_text[:100]}{'...' if len(generated_text) > 100 else ''}'")
+                        
+                except Exception as e:
+                    print(f"  ❌ Error generating for '{prompt}': {e}")
+                    continue
+            
+            # Log generation results to wandb
+            if generation_data:
+                # Log as table
+                wandb.log({
+                    f"text_generation/epoch_{epoch + 1}_samples": wandb.Table(
+                        columns=["epoch", "prompt", "temperature", "generated_text", "text_length", "word_count"],
+                        data=generation_data
+                    )
+                })
+                
+                # Log summary statistics
+                avg_length = np.mean([r["text_length"] for r in epoch_results])
+                avg_word_count = np.mean([r["word_count"] for r in epoch_results])
+                
+                wandb.log({
+                    f"text_generation/epoch_{epoch + 1}_avg_length": avg_length,
+                    f"text_generation/epoch_{epoch + 1}_avg_word_count": avg_word_count,
+                    f"text_generation/epoch_{epoch + 1}_total_samples": len(epoch_results),
+                    f"text_generation/epoch_{epoch + 1}_successful_generations": len([r for r in epoch_results if r["text_length"] > 5])
+                })
+                
+                # Store results for later analysis
+                self.generation_results.extend(epoch_results)
+                
+                print(f"✅ Generated {len(epoch_results)} text samples (avg length: {avg_length:.1f} chars)")
+            
+            print()  # Add spacing after generation test
+    
     # Custom callback for wandb logging with proper step tracking
     class WandbCallback(tf.keras.callbacks.Callback):
         def __init__(self):
@@ -710,6 +810,9 @@ def train_llm_model(text_data, model=None):
                 if 'val_loss' in logs:
                     logs['val_perplexity'] = np.exp(logs['val_loss'])
     
+    # Initialize text generation callback
+    text_gen_callback = TextGenerationCallback(test_prompts, word_to_id, id_to_word)
+    
     # Train the model with adjusted settings for large model
     history = model.fit(
         X_train, y_train,
@@ -726,9 +829,59 @@ def train_llm_model(text_data, model=None):
             lr_scheduler,
             tensorboard_callback,
             PerplexityCallback(),
-            WandbCallback()  # Use the fixed callback
+            WandbCallback(),  # Use the fixed callback
+            text_gen_callback  # Add text generation testing
         ]
     )
+    
+    # Log final generation analysis
+    if hasattr(text_gen_callback, 'generation_results') and text_gen_callback.generation_results:
+        final_results = text_gen_callback.generation_results
+        
+        # Analyze generation quality over epochs
+        epochs_data = {}
+        for result in final_results:
+            epoch = result["epoch"]
+            if epoch not in epochs_data:
+                epochs_data[epoch] = []
+            epochs_data[epoch].append(result)
+        
+        # Log progression of generation quality
+        for epoch, results in epochs_data.items():
+            avg_length = np.mean([r["text_length"] for r in results])
+            avg_words = np.mean([r["word_count"] for r in results])
+            
+            wandb.log({
+                f"generation_progression/epoch_{epoch}_avg_length": avg_length,
+                f"generation_progression/epoch_{epoch}_avg_words": avg_words,
+                f"generation_progression/epoch_{epoch}_samples": len(results)
+            })
+        
+        # Create final generation comparison table
+        final_comparison = []
+        for prompt in test_prompts:
+            prompt_results = [r for r in final_results if r["prompt"] == prompt]
+            if prompt_results:
+                # Get the latest generation for each temperature
+                latest_epoch = max(r["epoch"] for r in prompt_results)
+                latest_results = [r for r in prompt_results if r["epoch"] == latest_epoch]
+                
+                for result in latest_results:
+                    final_comparison.append([
+                        result["prompt"],
+                        result["temperature"],
+                        result["generated_text"],
+                        result["text_length"],
+                        result["epoch"]
+                    ])
+        
+        if final_comparison:
+            wandb.log({
+                "generation_final/best_epoch_samples": wandb.Table(
+                    columns=["prompt", "temperature", "generated_text", "length", "epoch"],
+                    data=final_comparison
+                )
+            })
     
     # Log final training metrics
     final_metrics = {}
